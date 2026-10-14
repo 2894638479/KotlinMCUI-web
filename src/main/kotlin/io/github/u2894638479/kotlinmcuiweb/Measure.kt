@@ -1,16 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
-import io.github.u2894638479.kotlinmcui.context.DslContext
-import io.github.u2894638479.kotlinmcui.entry.DslEntryPage
-import io.github.u2894638479.kotlinmcui.test.TestAnimationPage
-import io.github.u2894638479.kotlinmcui.test.TestBackendRenderPage
-import io.github.u2894638479.kotlinmcui.test.TestColorPage
-import io.github.u2894638479.kotlinmcui.test.TestImagePage
-import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
-import io.github.u2894638479.kotlinmcui.test.TestScrollPage
-import io.github.u2894638479.kotlinmcui.test.TestTextPage
-import io.github.u2894638479.kotlinmcui.test.TestTransformPage
 import java.io.File
 
 /**
@@ -38,7 +28,7 @@ fun main(args: Array<String>) {
 
     DslRuntime.install { WebMetadata }
     DslRuntime.platformReady { WebBackend }
-    WebBackend.create("measure") { pageOf(page) }.show()
+    WebBackend.create("measure") { pageNamed(page) }.show()
 
     val stream = FrameStream()
     val records = ArrayList<FrameRecord>(frames)
@@ -74,30 +64,6 @@ fun main(args: Array<String>) {
     }
 
     report(page, width, height, records, Recorder.assetCount)
-}
-
-/**
- * The page a name stands for.
- *
- * It is a context function rather than a table of `DslFunction` values on purpose: a `DslFunction`
- * carries the DSL context, and Kotlin only propagates a context type into a lambda in argument
- * position - a `when` branch or a stored function reference would not have one. Calling the page
- * here, inside the context, is the shape that works.
- */
-context(ctx: DslContext)
-private fun pageOf(name: String) {
-    when (name) {
-        "color" -> TestColorPage()
-        "render" -> TestBackendRenderPage()
-        "transform" -> TestTransformPage()
-        "text" -> TestTextPage()
-        "scroll" -> TestScrollPage()
-        "animation" -> TestAnimationPage()
-        "layout" -> TestLayoutPage()
-        "image" -> TestImagePage()
-        "entry" -> DslEntryPage()
-        else -> error("unknown page '$name'; try color, render, transform, text, scroll, animation, layout, image or entry")
-    }
 }
 
 private class FrameRecord(
@@ -215,12 +181,5 @@ private fun mean(records: List<FrameRecord>, of: (FrameRecord) -> Long): Long =
 
 private fun median(records: List<FrameRecord>, of: (FrameRecord) -> Long): Long =
     if (records.isEmpty()) 0L else records.map(of).sorted()[records.size / 2]
-
-private fun option(args: Array<String>, name: String): String? {
-    val prefix = "$name="
-    args.firstOrNull { it.startsWith(prefix) }?.let { return it.substring(prefix.length) }
-    val at = args.indexOf(name)
-    return if (at >= 0 && at + 1 < args.size) args[at + 1] else null
-}
 
 private const val STEADY_FRAMES = 10

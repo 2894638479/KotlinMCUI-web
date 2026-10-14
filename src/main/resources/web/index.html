@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KotlinMCUI</title>
+<style>
+  /* The canvas is the whole surface; the status line sits on top of it and is never in the way. */
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #101014; }
+  #screen { display: block; touch-action: none; outline: none; }
+  #status {
+    position: fixed; right: 6px; bottom: 4px;
+    font: 11px/1.4 monospace; color: #7f7f8a; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="screen" tabindex="0"></canvas>
+<div id="status">connecting</div>
+<script src="/client.js"></script>
+</body>
+</html>

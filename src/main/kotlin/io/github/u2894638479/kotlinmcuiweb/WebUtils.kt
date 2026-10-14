@@ -7,6 +7,7 @@ import io.github.u2894638479.kotlinmcui.math.px
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.io.File
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import javax.imageio.ImageIO
 
@@ -27,6 +28,13 @@ internal object WebUtils : DslBackendUtils {
     private val frameThread = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "kotlinmcui-web").apply { isDaemon = true }
     }
+
+    /**
+     * The thread every framework call must happen on: creating a screen, taking a frame, dispatching
+     * input. Exposed as an [java.util.concurrent.Executor] because a transport wants to hand work to
+     * it rather than suspend on it.
+     */
+    internal val frameExecutor: Executor get() = frameThread
 
     private val localImages = HashMap<String, ImageHolder>()
 
@@ -77,8 +85,23 @@ internal object WebUtils : DslBackendUtils {
 
     override val mainDispatcher: CoroutineDispatcher = frameThread.asCoroutineDispatcher()
 
-    /** The pixels live in the client's canvas, so the transport answers this, not the server. */
-    override suspend fun capture(fileName: String): File? = null
+    /**
+     * Photograph the client's canvas.
+     *
+     * This is the one contract member whose answer is on the other side of the socket: the pixels are
+     * in the browser, so the transport registers [captureSource] and the framework's request becomes
+     * a round trip. Without a transport - a measurement run, a test - there is nothing to photograph
+     * and `null` is the honest answer.
+     */
+    internal var captureSource: (() -> ByteArray?)? = null
+
+    override suspend fun capture(fileName: String): File? {
+        val png = captureSource?.invoke() ?: return null
+        val file = WebMetadata.configDir.resolve("screenshots").resolve(fileName).toFile()
+        file.parentFile?.mkdirs()
+        file.writeBytes(png)
+        return file
+    }
 
     override fun quit(exitCode: Int) {
         dslLogger.info("web utils: the framework asked to quit with $exitCode")

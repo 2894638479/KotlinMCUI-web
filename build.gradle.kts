@@ -116,6 +116,9 @@ tasks.test {
     // The recorder's measurements are the point of some of these tests, so their output is not
     // swallowed by the test runner.
     testLogging { showStandardStreams = true }
+    // A process publishes exactly one backend and the framework's context belongs to one thread, so a
+    // test class that serves a page and a class that renders one directly cannot share a JVM.
+    forkEvery = 1
 }
 
 /**
@@ -133,4 +136,22 @@ tasks.register<JavaExec>("measure") {
     providers.gradleProperty("page").orNull?.let { args("--page", it) }
     providers.gradleProperty("frames").orNull?.let { args("--frames", it) }
     providers.gradleProperty("svg").orNull?.let { args("--svg", it) }
+}
+
+/**
+ * Serves a page to a browser.
+ *
+ * `-Ppage=<name>` picks the page and `-Pport=<n>` the port (8080 by default); the URL is printed
+ * once the page is built, and Ctrl+C stops the process. `-Pcapture=<file>` instead waits for a
+ * browser, asks it to photograph its canvas, writes the PNG and leaves - the acceptance check.
+ */
+tasks.register<JavaExec>("serve") {
+    group = "application"
+    description = "Serves a page over HTTP and WebSocket for a browser to draw."
+    mainClass.set("io.github.u2894638479.kotlinmcuiweb.ServeKt")
+    classpath = files(sourceSets["main"].output, sourceSets["main"].runtimeClasspath, standalone)
+    workingDir = projectDir
+    providers.gradleProperty("page").orNull?.let { args("--page", it) }
+    providers.gradleProperty("port").orNull?.let { args("--port", it) }
+    providers.gradleProperty("capture").orNull?.let { args("--capture", it) }
 }
