@@ -11,6 +11,9 @@
 const NOCHANGE = 0x4e;
 const KEYFRAME = 0x4b;
 const DELTA = 0x44;
+// The asset table, which the server sends before a keyframe: a client that connects later has missed
+// the definitions the frame was the first to use, and would otherwise draw placeholders forever.
+const ASSETS = 0x41;
 const KEYFRAME_HEADER = 9;
 const DELTA_HEADER = 17;
 
@@ -99,6 +102,10 @@ function connect() {
       return;
     }
     const message = new Uint8Array(event.data);
+    if (message[0] === ASSETS) {
+      applyAssets(message);
+      return;
+    }
     frame = decode(frame, message);
     awaiting = false;
     paint();
@@ -398,9 +405,11 @@ function quad(words, at, transform) {
     return;
   }
   // Otherwise the two triangles the game's backends draw, for the same reason: four unrelated
-  // corners have no single affine field, and this is the model the framework measured against.
-  fill([points[0], points[1], points[3]], css(average([lt, rt, lb])));
-  fill([points[1], points[2], points[3]], css(average([rt, rb, lb])));
+  // corners have no single affine field, and this is the model the framework measured against. Each
+  // triangle is shaded per vertex, so the palette's square ramps along its diagonal instead of
+  // flattening into two blocks.
+  shadeTriangle([points[0], points[1], points[3]], [lt, rt, lb]);
+  shadeTriangle([points[1], points[2], points[3]], [rt, rb, lb]);
 }
 
 function triangles(words, at, transform) {
@@ -413,8 +422,91 @@ function triangles(words, at, transform) {
       const base = verticesAt + (i + step) * stride;
       return project(transform, floatOf(words[base]), floatOf(words[base + 1]));
     });
-    fill(points, css(average([words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]])));
+    const colours = [words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]];
+    if (colours[0] === colours[1] && colours[1] === colours[2]) fill(points, css(colours[0]));
+    else shadeTriangle(points, colours);
   }
+}
+
+/**
+ * Fill a triangle with a colour per vertex.
+ *
+ * Canvas 2D has no interpolating triangle, but an affine colour field *is* a bilinear one when the
+ * fourth corner is the one the affine plane implies, so: put the three colours and that fourth into a
+ * two-by-two image, map the unit square onto the parallelogram the triangle spans, and clip to the
+ * triangle. Bilinear filtering of the tiny image does the interpolation, and one clip plus one draw
+ * beats subdividing into a few hundred of them.
+ */
+function shadeTriangle(points, colours) {
+  const field = triangleField(colours);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.beginPath();
+  path(points);
+  ctx.clip();
+  // (0,0) -> first vertex, (1,0) -> second, (0,1) -> third: exactly the affine map of the field.
+  ctx.setTransform(
+    points[1][0] - points[0][0], points[1][1] - points[0][1],
+    points[2][0] - points[0][0], points[2][1] - points[0][1],
+    points[0][0], points[0][1],
+  );
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(field, 0, 0, 2, 2, 0, 0, 1, 1);
+  ctx.restore();
+}
+
+const fields = new Map();
+
+/** How finely the affine field is sampled. Two-by-two is exact in theory and banded in practice. */
+const FIELD_SIZE = 16;
+
+/** The colour field of a triangle as a small image, cached by the colours it is built from. */
+function triangleField(colours) {
+  const key = colours.join(',');
+  const cached = fields.get(key);
+  if (cached) return cached;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = FIELD_SIZE;
+  canvas.height = FIELD_SIZE;
+  const context = canvas.getContext('2d');
+  // The affine plane through the three colours decides the fourth corner of the parallelogram, and
+  // every texel is that plane evaluated where the texel will be sampled from.
+  const c00 = channels(colours[0]);
+  const c10 = channels(colours[1]);
+  const c01 = channels(colours[2]);
+  const c11 = c10.map((value, index) => value + c01[index] - c00[index]);
+  const image = context.createImageData(FIELD_SIZE, FIELD_SIZE);
+  for (let y = 0; y < FIELD_SIZE; y++) {
+    const v = (y + 0.5) / FIELD_SIZE;
+    for (let x = 0; x < FIELD_SIZE; x++) {
+      const u = (x + 0.5) / FIELD_SIZE;
+      const at = (y * FIELD_SIZE + x) * 4;
+      for (let channel = 0; channel < 4; channel++) {
+        const value =
+          c00[channel] * (1 - u) * (1 - v) +
+          c10[channel] * u * (1 - v) +
+          c01[channel] * (1 - u) * v +
+          c11[channel] * u * v;
+        image.data[at + channel] = clamp(value);
+      }
+    }
+  }
+  context.putImageData(image, 0, 0);
+  fields.set(key, canvas);
+  return canvas;
+}
+
+function channels(packed) {
+  return [(packed >>> 24) & 0xff, (packed >>> 16) & 0xff, (packed >>> 8) & 0xff, packed & 0xff];
+}
+
+function pack(channels) {
+  return (channels[0] << 24) | (channels[1] << 16) | (channels[2] << 8) | channels[3];
+}
+
+function clamp(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function text(words, at, transform) {
@@ -511,8 +603,27 @@ function defineAsset(index, id) {
     images[id] = image;
     wake();
   };
-  image.onerror = () => {};
+  // A miss is worth saying out loud: it is the difference between a placeholder and a broken path.
+  image.onerror = () => send('log client could not load asset: ' + id);
   image.src = '/asset/' + encodeURIComponent(id);
+}
+
+/** The table the server sends before a keyframe: `[0x41, count]` then index, length, characters. */
+function applyAssets(message) {
+  const view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+  const count = view.getUint32(1, true);
+  let at = 5;
+  for (let i = 0; i < count; i++) {
+    const index = view.getUint32(at, true);
+    const length = view.getUint32(at + 4, true);
+    at += 8;
+    let id = '';
+    for (let c = 0; c < length; c++) {
+      id += String.fromCharCode(view.getUint32(at, true));
+      at += 4;
+    }
+    defineAsset(index, id);
+  }
 }
 
 function imageOf(index) {

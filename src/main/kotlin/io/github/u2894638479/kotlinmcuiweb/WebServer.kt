@@ -142,6 +142,8 @@ internal class WebServer(
             val key = request.headers["sec-websocket-key"]
             when {
                 request.path == "/ws" && key != null -> upgrade(socket, key)
+                // A browser asks for the tab icon by name whether or not the page declares one.
+                request.path == FAVICON_PATH -> asset(socket, FRAMEWORK_ICON)
                 request.path.startsWith(ASSET_PATH) -> asset(socket, request.path.removePrefix(ASSET_PATH))
                 else -> staticFile(socket, request.path)
             }
@@ -197,18 +199,7 @@ internal class WebServer(
         if (id.startsWith(WebUtils.LOCAL_PREFIX)) {
             return WebUtils.localImageFile(id)?.let { file -> runCatching { file.readBytes() }.getOrNull() }
         }
-        val separator = id.indexOf(':')
-        val candidates = if (separator > 0) {
-            val namespace = id.substring(0, separator)
-            val path = id.substring(separator + 1)
-            listOf("/assets/$namespace/$path", "/$path")
-        } else {
-            listOf("/$id")
-        }
-        for (candidate in candidates) {
-            javaClass.getResourceAsStream(candidate)?.use { return it.readBytes() }
-        }
-        return null
+        return WebAssets.bytes(id)
     }
 
     /** A file from this jar's `web/` resources. Nothing else is reachable, so no path can escape. */
@@ -360,7 +351,13 @@ internal class WebServer(
         fun send(words: IntArray, size: Int) {
             runCatching {
                 val message = stream.encode(words, size)
-                synchronized(writeLock) { socket.sendBinary(message) }
+                synchronized(writeLock) {
+                    // A keyframe can reference assets this client was never told about: the table is the
+                    // server's and an id is defined once per server, not once per connection. So the
+                    // table travels with every keyframe, which is what makes a reload resolve its icons.
+                    if (message[0] == Encoder.KEYFRAME) socket.sendBinary(Encoder.assets(Recorder.assetTable()))
+                    socket.sendBinary(message)
+                }
             }.onFailure { dslLogger.warn("web server: a frame could not be sent: ${it.message}") }
         }
 
@@ -462,6 +459,11 @@ internal class WebServer(
 
         /** Where a client asks for an asset, by the id a frame referenced. */
         const val ASSET_PATH = "/asset/"
+
+        /** Where a browser asks for the tab icon; the framework's own icon answers it. */
+        const val FAVICON_PATH = "/favicon.ico"
+
+        const val FRAMEWORK_ICON = "kotlinmcui:icon.png"
 
         const val IMAGE_TYPE = "image/png"
 
