@@ -32,7 +32,9 @@ internal object FontMetrics {
     fun update(reference: Float, measured: Map<Int, Float>) {
         if (reference <= 0f || measured.isEmpty()) return
         this.reference = reference
-        advances = measured
+        // Merged rather than replaced: a client reports the glyphs it meets as it meets them, so an
+        // update carries what is new and everything already known has to survive it.
+        advances = HashMap(advances).apply { putAll(measured) }
         version += 1
     }
 

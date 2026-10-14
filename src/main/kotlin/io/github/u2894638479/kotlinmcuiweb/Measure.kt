@@ -1,6 +1,7 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
+import io.github.u2894638479.kotlinmcui.entry.DslEntryLoader
 import java.io.File
 
 /**
@@ -28,6 +29,10 @@ fun main(args: Array<String>) {
 
     DslRuntime.install { WebMetadata }
     DslRuntime.platformReady { WebBackend }
+    // Whatever demo overlays this machine has enabled are switched off for the run: an overlay draws
+    // per-frame timings, and a page that reports its own frame time is a page that never repeats
+    // itself. The numbers below are meant to be the page's, not the overlay's.
+    for (overlay in DslEntryLoader.enabledOverlays) DslEntryLoader.setOverlayEnabled(overlay, false)
     WebBackend.create("measure") { pageNamed(page) }.show()
 
     val stream = FrameStream()
@@ -102,6 +107,14 @@ private class FrameRecord(
     /** Words per record type, walked from the frame itself rather than counted as it was recorded. */
     val wordsByOp: LongArray = walk(words)
 
+    /**
+     * Which record the first difference from the previous frame falls in.
+     *
+     * A frame that changes has to be explained: the sizes alone say a page is not still, and this says
+     * which part of it moved.
+     */
+    val firstDifference: String = locateDifference(previous, words)
+
     private companion object {
         fun walk(words: IntArray): LongArray {
             val totals = LongArray(Op.COUNT)
@@ -114,6 +127,75 @@ private class FrameRecord(
             }
             return totals
         }
+
+        fun locateDifference(previous: IntArray?, words: IntArray): String {
+            if (previous == null) return "-"
+            var index = 0
+            val limit = minOf(previous.size, words.size)
+            while (index < limit && previous[index] == words[index]) index++
+            if (index >= limit && previous.size == words.size) return "none"
+            var at = 0
+            while (at < words.size) {
+                val stride = Op.strideAt(words, at)
+                if (index < at + stride) {
+                    val op = Op.nameOf(words[at])
+                    // For text, name the character and the run around it: a per-frame number is only
+                    // identifiable from the label it sits in.
+                    return if (words[at] == Op.TEXT) {
+                        "$op@$at '${character(previous, at)}'->'${character(words, at)}' in \"${run(words, at)}\""
+                    } else {
+                        "$op@$at"
+                    }
+                }
+                at += stride
+            }
+            return "tail@${words.size}"
+        }
+
+        fun character(words: IntArray, at: Int): String {
+            val code = words.getOrNull(at + 1) ?: return "?"
+            return runCatching { String(Character.toChars(code)) }.getOrDefault("?")
+        }
+
+        /**
+         * The characters of the text run the record at [at] belongs to.
+         *
+         * A text op carries one glyph, so a label is a streak of text records; walking outwards while
+         * the records stay text (and close enough to be the same line) is what turns "a digit moved"
+         * into "this label is animating".
+         */
+        fun run(words: IntArray, at: Int): String {
+            val before = StringBuilder()
+            var step = at
+            while (before.length < RUN_LIMIT) {
+                val previousAt = previousRecord(words, step) ?: break
+                if (words[previousAt] != Op.TEXT) break
+                before.insert(0, character(words, previousAt))
+                step = previousAt
+            }
+            val after = StringBuilder()
+            step = at
+            while (after.length < RUN_LIMIT) {
+                val nextAt = step + Op.strideAt(words, step)
+                if (nextAt >= words.size || words[nextAt] != Op.TEXT) break
+                after.append(character(words, nextAt))
+                step = nextAt
+            }
+            return before.toString() + character(words, at) + after
+        }
+
+        /** The record that ends where [at] begins, by walking from the frame's start. */
+        fun previousRecord(words: IntArray, at: Int): Int? {
+            var step = 0
+            var last = -1
+            while (step < at) {
+                last = step
+                step += Op.strideAt(words, step)
+            }
+            return if (step == at && last >= 0) last else null
+        }
+
+        const val RUN_LIMIT = 24
     }
 }
 
@@ -124,10 +206,10 @@ private fun report(page: String, width: Int, height: Int, records: List<FrameRec
 
     println("== web frame record: page=$page ${width}x$height, ${records.size} frames ==")
     println()
-    println("frame   words    bytes  type   prefix   suffix  literal   wire B   record us")
+    println("frame   words    bytes  type   prefix   suffix  literal   wire B   record us  first difference")
     for (record in records) {
         println(
-            "%5d %7d %8d %5s %8d %8d %8d %8d %11d".format(
+            "%5d %7d %8d %5s %8d %8d %8d %8d %11d  %s".format(
                 record.index,
                 record.words.size,
                 record.bytes,
@@ -137,6 +219,7 @@ private fun report(page: String, width: Int, height: Int, records: List<FrameRec
                 record.literal,
                 record.messageBytes,
                 record.nanos / 1000,
+                record.firstDifference,
             )
         )
     }

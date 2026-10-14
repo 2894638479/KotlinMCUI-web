@@ -48,12 +48,21 @@ const SAMPLES = ['中', '文', 'ぁ', 'あ', '한', 'А', 'я', '😀', '\u00a0'
 let socket = null;
 let frame = null;
 let awaiting = false;
-let timer = 0;
 let dpr = window.devicePixelRatio || 1;
 // A capture request before the first frame would photograph an empty canvas, which is worse than no
 // answer at all: the server keeps asking, so staying quiet is the honest reply until there is
 // something on screen.
 let painted = false;
+// Frame pacing. The client asks for one frame per display refresh while anything is changing, and
+// drops to a slow poll once the server says nothing changed - which is also what stops a still page
+// from spinning the frame thread at hundreds of frames a second.
+let asking = true;
+let stillUntil = 0;
+
+// The asset ids a frame defined, and the pixels once they arrive. A failed load is remembered as null
+// so a missing asset is asked for once rather than every frame.
+const assets = [];
+const images = {};
 
 function resizeCanvas() {
   dpr = window.devicePixelRatio || 1;
@@ -70,10 +79,13 @@ function connect() {
     status.textContent = 'connected';
     // Metrics first: the server lays text out with them, so the very first frame should already have
     // them. Then the size, then a keyframe to start from.
+    // The language first: the server lays a page out with it, and it is a property of the process -
+    // the tree is shared - so the first client to speak decides what language the UI is in.
+    send('lang ' + (navigator.language || 'en_us'));
     reportMetrics();
     send('resize ' + canvas.width + ' ' + canvas.height);
     send('keyframe');
-    tick();
+    asking = true;
   };
   socket.onmessage = (event) => {
     // Text messages are commands for the client; binary ones are frames.
@@ -91,10 +103,16 @@ function connect() {
     awaiting = false;
     paint();
     painted = true;
+    // A character the server has not been told about yet is laid out with a guess; measuring it here
+    // is what turns the next frame into the right one.
+    reportMissingMetrics(frame);
     status.textContent = message[0] === NO_CHANGE
       ? 'still (' + message.length + ' B)'
       : 'frame ' + frame.length + ' words (' + message.length + ' B)';
-    schedule(message[0] === NO_CHANGE ? IDLE_MILLIS : 0);
+    // A frame that changed asks for the next one on the coming refresh (an animation runs at the
+    // display's rate); one that did not drops to the idle poll.
+    asking = message[0] !== NO_CHANGE;
+    stillUntil = performance.now() + IDLE_MILLIS;
   };
   socket.onclose = () => {
     status.textContent = 'disconnected, retrying';
@@ -103,16 +121,25 @@ function connect() {
   socket.onerror = () => socket.close();
 }
 
-function schedule(delay) {
-  clearTimeout(timer);
-  timer = setTimeout(tick, delay);
-}
-
-function tick() {
+/**
+ * The frame clock: one request per animation frame, which is the display's own rate.
+ *
+ * This is deliberately not a `setTimeout` loop. Asking again the moment a frame arrives runs the
+ * server's frame thread as fast as the socket allows - hundreds of frames a second, all of them
+ * competing with the input that the user is waiting on, which is exactly how a page that reports a
+ * very high frame rate still feels slow. Coupling to the refresh keeps animation smooth and gives the
+ * server room to answer input.
+ */
+function pump() {
+  requestAnimationFrame(pump);
   if (awaiting || !socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!asking && performance.now() < stillUntil) return;
+  asking = false;
   awaiting = true;
   socket.send('tick');
 }
+
+requestAnimationFrame(pump);
 
 function send(text) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(text);
@@ -120,13 +147,41 @@ function send(text) {
 
 // Layout is the server's job, but the font is the browser's, so the browser measures and reports.
 // The server scales these to whatever size a glyph is drawn at.
+const measured = new Set();
+
 function reportMetrics() {
   const codes = [];
   for (let cp = 0x20; cp <= 0x7e; cp++) codes.push(cp);
   for (const sample of SAMPLES) codes.push(sample.codePointAt(0));
+  sendMetrics(codes);
+}
+
+function sendMetrics(codes) {
+  const fresh = codes.filter((cp) => !measured.has(cp));
+  if (!fresh.length) return;
+  for (const cp of fresh) measured.add(cp);
   ctx.font = REFERENCE_PX + 'px monospace';
-  const measured = codes.map((cp) => cp + ':' + ctx.measureText(String.fromCodePoint(cp)).width.toFixed(3));
-  send('metrics ' + REFERENCE_PX + ' ' + measured.join(' '));
+  const widths = fresh.map((cp) => cp + ':' + ctx.measureText(String.fromCodePoint(cp)).width.toFixed(3));
+  send('metrics ' + REFERENCE_PX + ' ' + widths.join(' '));
+}
+
+/**
+ * Report every character of a frame the server has not been told about yet.
+ *
+ * A fixed sample cannot know which scripts a page uses: the framework's own labels are translated, and
+ * a translated page is full of code points a Latin sample has never seen - which is exactly how the
+ * first Chinese page came out with its glyphs on top of each other. Measuring on sight means the
+ * layout corrects itself one frame after a character first appears, whatever the script is, and the
+ * report stays limited to what the page actually draws.
+ */
+function reportMissingMetrics(frame) {
+  const missing = [];
+  let at = 0;
+  while (at < frame.length) {
+    if (frame[at] === Op.TEXT) missing.push(frame[at + 1]);
+    at += strideAt(frame, at);
+  }
+  sendMetrics(missing);
 }
 
 // A script error in here would otherwise be invisible on the server side.
@@ -252,6 +307,7 @@ function paint() {
       case Op.CLIP_POP:
         if (clips > 0) { ctx.restore(); clips--; }
         break;
+      case Op.TEXTURE: defineAsset(words[at + 1], assetId(words, at)); break;
       case Op.TRANSFORM_PUSH:
         transforms.push(transform);
         transform = multiply(transform, matrix(words, at + 1));
@@ -289,12 +345,36 @@ function fill(points, colour) {
   ctx.fill();
 }
 
+function assetId(words, at) {
+  const length = words[at + 2];
+  let id = '';
+  for (let i = 0; i < length; i++) id += String.fromCharCode(words[at + 3 + i]);
+  return id;
+}
+
 function quad(words, at, transform) {
   const points = corners(words, at + 1, transform);
   if (!points) return;
   const lt = words[at + 5], rt = words[at + 6], lb = words[at + 7], rb = words[at + 8];
-  if (words[at + 9] !== Op.NO_ASSET) {
-    // No pixels on this side yet: mark where a texture goes, as the SVG snapshot does.
+  const asset = words[at + 9];
+  if (asset !== Op.NO_ASSET) {
+    // A textured quad is placed with the transform rather than projected by hand, because
+    // `drawImage` can only be placed with an affine one. Everywhere else this painter projects
+    // corners itself so a perspective comes out right; here the perspective case is what falls back
+    // to the placeholder instead.
+    const image = imageOf(asset);
+    const u0 = floatOf(words[at + 10]), v0 = floatOf(words[at + 11]);
+    const u1 = floatOf(words[at + 12]), v1 = floatOf(words[at + 13]);
+    if (image && isAffine(transform) && u1 > u0 && v1 > v0 &&
+        u0 >= 0 && v0 >= 0 && u1 <= image.width && v1 <= image.height) {
+      const left = floatOf(words[at + 1]), top = floatOf(words[at + 2]);
+      const right = floatOf(words[at + 3]), bottom = floatOf(words[at + 4]);
+      ctx.save();
+      ctx.setTransform(transform[0], transform[3], transform[1], transform[4], transform[2], transform[5]);
+      ctx.drawImage(image, u0, v0, u1 - u0, v1 - v0, left, top, right - left, bottom - top);
+      ctx.restore();
+      return;
+    }
     fill(points, 'rgba(140,140,140,0.6)');
     return;
   }
@@ -413,7 +493,36 @@ function position(event) {
 }
 
 function wake() {
-  schedule(0);
+  asking = true;
+}
+
+// ---- assets -----------------------------------------------------------------------------------
+//
+// Only the id travels in a frame, once, and the pixels come over HTTP - cacheable, parallel and out
+// of the way of the frame stream. The server resolves `namespace:path` on its classpath, which is
+// where the framework's own icon lives.
+
+function defineAsset(index, id) {
+  assets[index] = id;
+  if (id in images) return;
+  images[id] = null;
+  const image = new Image();
+  image.onload = () => {
+    images[id] = image;
+    wake();
+  };
+  image.onerror = () => {};
+  image.src = '/asset/' + encodeURIComponent(id);
+}
+
+function imageOf(index) {
+  const id = assets[index];
+  return id === undefined ? null : images[id] || null;
+}
+
+/** Whether the current transform is affine, which is what `drawImage` can be placed with. */
+function isAffine(m) {
+  return m[6] === 0 && m[7] === 0 && m[8] === 1;
 }
 
 canvas.addEventListener('pointermove', (event) => {

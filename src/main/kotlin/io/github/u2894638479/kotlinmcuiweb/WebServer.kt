@@ -8,6 +8,7 @@ import java.io.BufferedOutputStream
 import java.io.InputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLDecoder
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -139,7 +140,11 @@ internal class WebServer(
                 return
             }
             val key = request.headers["sec-websocket-key"]
-            if (request.path == "/ws" && key != null) upgrade(socket, key) else staticFile(socket, request.path)
+            when {
+                request.path == "/ws" && key != null -> upgrade(socket, key)
+                request.path.startsWith(ASSET_PATH) -> asset(socket, request.path.removePrefix(ASSET_PATH))
+                else -> staticFile(socket, request.path)
+            }
         } catch (throwable: Throwable) {
             dslLogger.warn("web server: connection ended: ${throwable.message}")
         } finally {
@@ -160,9 +165,54 @@ internal class WebServer(
         }
     }
 
+    /**
+     * The pixels behind an asset id.
+     *
+     * Ids are the framework's `namespace:path`, which resolves to `/assets/<namespace>/<path>` on the
+     * classpath - that is where the framework's own icon lives, and where a mod's assets live in its
+     * own jar. A plain path is tried as it is, and a `local:` id is served only when this backend
+     * described that file, so a client cannot name a path of its own. Anything else is a 404 and the
+     * client keeps drawing its placeholder.
+     */
+    private fun asset(socket: Socket, rawId: String) {
+        val id = runCatching { URLDecoder.decode(rawId, "UTF-8") }.getOrDefault(rawId)
+        val bytes = assetBytes(id)
+        val output = BufferedOutputStream(socket.getOutputStream())
+        if (bytes == null) {
+            dslLogger.info("web assets: '$id' was not found, the client keeps its placeholder")
+            output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+        } else {
+            output.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: $IMAGE_TYPE\r\nContent-Length: ${bytes.size}\r\n" +
+                        "Cache-Control: max-age=3600\r\nConnection: close\r\n\r\n"
+                    ).toByteArray(),
+            )
+            output.write(bytes)
+        }
+        output.flush()
+    }
+
+    private fun assetBytes(id: String): ByteArray? {
+        if (id.startsWith(WebUtils.LOCAL_PREFIX)) {
+            return WebUtils.localImageFile(id)?.let { file -> runCatching { file.readBytes() }.getOrNull() }
+        }
+        val separator = id.indexOf(':')
+        val candidates = if (separator > 0) {
+            val namespace = id.substring(0, separator)
+            val path = id.substring(separator + 1)
+            listOf("/assets/$namespace/$path", "/$path")
+        } else {
+            listOf("/$id")
+        }
+        for (candidate in candidates) {
+            javaClass.getResourceAsStream(candidate)?.use { return it.readBytes() }
+        }
+        return null
+    }
+
     /** A file from this jar's `web/` resources. Nothing else is reachable, so no path can escape. */
-    private fun staticFile(socket: Socket, path: String) {
-        val name = when (path) {
+    private fun staticFile(socket: Socket, path: String) {        val name = when (path) {
             "/", "", "/index.html" -> "index.html"
             "/client.js" -> "client.js"
             else -> null
@@ -270,6 +320,7 @@ internal class WebServer(
             "char" -> parts.getOrNull(1)?.toIntOrNull()?.let { WebInput.typed(it) }
             "blur" -> WebInput.blur()
             "metrics" -> applyMetrics(parts)
+            "lang" -> parts.getOrNull(1)?.let { WebUtils.useLanguage(it) }
             "log" -> dslLogger.warn("web client: " + parts.drop(1).joinToString(" "))
         }
     }
@@ -347,7 +398,7 @@ internal class WebServer(
                                 parts.getOrNull(1)?.toIntOrNull() ?: width,
                                 parts.getOrNull(2)?.toIntOrNull() ?: height,
                             )
-                            "move", "button", "wheel", "key", "char", "metrics", "log" -> input(message.text.trim())
+                            "move", "button", "wheel", "key", "char", "metrics", "log", "lang" -> input(message.text.trim())
                         }
                     }
                 }
@@ -408,6 +459,11 @@ internal class WebServer(
 
     private companion object {
         const val MAX_LINE = 8192
+
+        /** Where a client asks for an asset, by the id a frame referenced. */
+        const val ASSET_PATH = "/asset/"
+
+        const val IMAGE_TYPE = "image/png"
 
         /** Browsers report wheel deltas in pixels; one notch is a hundred of them, near enough. */
         const val WHEEL_STEP = 100f

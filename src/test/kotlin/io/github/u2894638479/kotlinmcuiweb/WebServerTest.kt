@@ -4,6 +4,7 @@ import io.github.u2894638479.kotlinmcui.input.Key
 import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -188,6 +189,23 @@ class WebServerTest {
             client.sendText("key Escape down 0")
             assertTrue(await { WebBackend.pageCount == before }, "escape did not leave the page")
         }
+    }
+
+    @Test
+    fun `the framework's own assets are served and unknown ones are not`() {
+        val running = start()
+
+        // The icon the entry list draws: `namespace:path` resolves to the classpath's assets.
+        val icon = read("/asset/" + URLEncoder.encode("kotlinmcui:icon.png", "UTF-8"))
+        assertTrue(icon.startsWith("HTTP/1.1 200 OK"), icon.take(40))
+        assertTrue(icon.contains("Content-Type: image/png"), "not served as an image")
+        val length = Regex("Content-Length: (\\d+)").find(icon)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        assertTrue(length > 100, "the icon came back empty (length $length)")
+
+        assertTrue(
+            read("/asset/" + URLEncoder.encode("nobody:nothing.png", "UTF-8")).contains("404"),
+            "an asset that does not exist has to be a 404, so the client keeps its placeholder",
+        )
     }
 
     private fun first(client: WsClient): ByteArray = client.readMessage()?.payload ?: error("no frame arrived")

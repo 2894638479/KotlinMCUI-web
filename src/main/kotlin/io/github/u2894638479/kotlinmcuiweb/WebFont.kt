@@ -60,6 +60,9 @@ internal class WebFont(@Suppress("UNUSED_PARAMETER") name: String?) : DslFont<Un
         code < 0x20 -> 0f
         code in NARROW -> NARROW_ADVANCE
         code in WIDE -> WIDE_ADVANCE
+        // A script this table knows nothing about - CJK, Hangul, kana - is drawn about one em wide,
+        // so a glyph the client has not measured yet is wider than a Latin default, not narrower.
+        code > WIDE_SCRIPT_FLOOR -> LINE_HEIGHT.toFloat()
         else -> DEFAULT_ADVANCE
     }
 
@@ -70,6 +73,9 @@ internal class WebFont(@Suppress("UNUSED_PARAMETER") name: String?) : DslFont<Un
         const val NARROW_ADVANCE = 2f
         const val DEFAULT_ADVANCE = 6f
         const val WIDE_ADVANCE = 9f
+
+        /** Everything from here up is a wide script: CJK, kana, Hangul. */
+        const val WIDE_SCRIPT_FLOOR = 0x1100
 
         /** The narrow and wide characters of the game's font, near enough to lay a page out. */
         val NARROW = "!',.:;iIl|`".map { it.code }.toSet()
