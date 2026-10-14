@@ -253,7 +253,28 @@ internal class WebServer(
             }
             "char" -> parts.getOrNull(1)?.toIntOrNull()?.let { WebInput.typed(it) }
             "blur" -> WebInput.blur()
+            "metrics" -> applyMetrics(parts)
+            "log" -> dslLogger.warn("web client: " + parts.drop(1).joinToString(" "))
         }
+    }
+
+    /**
+     * The advances the client measured, in one line: a reference font size and `codePoint:width`
+     * pairs. See [FontMetrics] for why the client is the one that knows.
+     */
+    private fun applyMetrics(parts: List<String>) {
+        val reference = parts.getOrNull(1)?.toFloatOrNull() ?: return
+        val measured = HashMap<Int, Float>()
+        for (entry in parts.drop(2)) {
+            val separator = entry.indexOf(':')
+            if (separator <= 0) continue
+            val code = entry.substring(0, separator).toIntOrNull() ?: continue
+            val width = entry.substring(separator + 1).toFloatOrNull() ?: continue
+            measured[code] = width
+        }
+        if (measured.isEmpty()) return
+        FontMetrics.update(reference, measured)
+        dslLogger.info("web server: the client reported ${measured.size} glyph advances (reference ${reference}px)")
     }
 
     private fun number(parts: List<String>, index: Int): Double = parts.getOrNull(index)?.toDoubleOrNull() ?: 0.0
@@ -310,7 +331,7 @@ internal class WebServer(
                                 parts.getOrNull(1)?.toIntOrNull() ?: width,
                                 parts.getOrNull(2)?.toIntOrNull() ?: height,
                             )
-                            "move", "button", "wheel", "key", "char" -> input(message.text.trim())
+                            "move", "button", "wheel", "key", "char", "metrics", "log" -> input(message.text.trim())
                         }
                     }
                 }

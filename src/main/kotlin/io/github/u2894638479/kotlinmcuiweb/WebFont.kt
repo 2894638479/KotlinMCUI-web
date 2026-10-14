@@ -24,10 +24,23 @@ import io.github.u2894638479.kotlinmcui.text.DslRenderableChar
  */
 internal class WebFont(@Suppress("UNUSED_PARAMETER") name: String?) : DslFont<Unit> {
     private val glyphs = HashMap<Int, DslGlyph>()
+    private var loadedVersion = -1
 
     override val lineHeight: Measure = LINE_HEIGHT.px
 
-    override fun glyph(code: Int): DslGlyph = glyphs.getOrPut(code) { Metrics(advanceOf(code).px) }
+    /**
+     * The advance of [code], from the client's own measurements when it has reported any.
+     *
+     * The glyph cache is dropped whenever [FontMetrics] changes: a reported advance arrives once per
+     * connection, and every glyph measured before it would otherwise keep the approximation forever.
+     */
+    override fun glyph(code: Int): DslGlyph {
+        if (FontMetrics.version != loadedVersion) {
+            glyphs.clear()
+            loadedVersion = FontMetrics.version
+        }
+        return glyphs.getOrPut(code) { Metrics(advanceOf(code).px) }
+    }
 
     private class Metrics(advance: Measure) : DslGlyph {
         override val normalAdvance = advance
@@ -39,7 +52,10 @@ internal class WebFont(@Suppress("UNUSED_PARAMETER") name: String?) : DslFont<Un
     override fun renderChar(char: DslRenderableChar, x: Measure, y: Measure, effectLeft: Measure, effectRight: Measure) =
         Recorder.text(char, x, y, effectLeft, effectRight)
 
-    private fun advanceOf(code: Int): Float = when {
+    private fun advanceOf(code: Int): Float =
+        FontMetrics.advanceOf(code, LINE_HEIGHT.toFloat()) ?: approximationOf(code)
+
+    private fun approximationOf(code: Int): Float = when {
         code == SPACE -> SPACE_ADVANCE
         code < 0x20 -> 0f
         code in NARROW -> NARROW_ADVANCE

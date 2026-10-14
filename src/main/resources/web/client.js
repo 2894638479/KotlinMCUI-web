@@ -31,11 +31,24 @@ const canvas = document.getElementById('screen');
 const status = document.getElementById('status');
 const ctx = canvas.getContext('2d');
 
+// The size the advances are measured at. Everything scales linearly, so a large reference keeps the
+// rounding error small without measuring at every size the page might use.
+const REFERENCE_PX = 90;
+
+// The code points the server is told about. Latin printable covers the framework's own labels;
+// the samples after it stand for scripts whose width differs a lot from Latin, so a page with a
+// translation in one of them still lays out sensibly.
+const SAMPLES = ['中', '文', 'ぁ', 'あ', '한', 'А', 'я', '😀', '\u00a0'];
+
 let socket = null;
 let frame = null;
 let awaiting = false;
 let timer = 0;
 let dpr = window.devicePixelRatio || 1;
+// A capture request before the first frame would photograph an empty canvas, which is worse than no
+// answer at all: the server keeps asking, so staying quiet is the honest reply until there is
+// something on screen.
+let painted = false;
 
 function resizeCanvas() {
   dpr = window.devicePixelRatio || 1;
@@ -50,6 +63,9 @@ function connect() {
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
     status.textContent = 'connected';
+    // Metrics first: the server lays text out with them, so the very first frame should already have
+    // them. Then the size, then a keyframe to start from.
+    reportMetrics();
     send('resize ' + canvas.width + ' ' + canvas.height);
     send('keyframe');
     tick();
@@ -58,6 +74,7 @@ function connect() {
     // Text messages are commands for the client; binary ones are frames.
     if (typeof event.data === 'string') {
       if (event.data.trim() === 'capture') {
+        if (!painted) return;
         canvas.toBlob((blob) => {
           if (blob) blob.arrayBuffer().then((buffer) => socket.send(buffer));
         }, 'image/png');
@@ -68,6 +85,7 @@ function connect() {
     frame = decode(frame, message);
     awaiting = false;
     paint();
+    painted = true;
     status.textContent = message[0] === NO_CHANGE
       ? 'still (' + message.length + ' B)'
       : 'frame ' + frame.length + ' words (' + message.length + ' B)';
@@ -94,6 +112,22 @@ function tick() {
 function send(text) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(text);
 }
+
+// Layout is the server's job, but the font is the browser's, so the browser measures and reports.
+// The server scales these to whatever size a glyph is drawn at.
+function reportMetrics() {
+  const codes = [];
+  for (let cp = 0x20; cp <= 0x7e; cp++) codes.push(cp);
+  for (const sample of SAMPLES) codes.push(sample.codePointAt(0));
+  ctx.font = REFERENCE_PX + 'px monospace';
+  const measured = codes.map((cp) => cp + ':' + ctx.measureText(String.fromCodePoint(cp)).width.toFixed(3));
+  send('metrics ' + REFERENCE_PX + ' ' + measured.join(' '));
+}
+
+// A script error in here would otherwise be invisible on the server side.
+window.addEventListener('error', (event) => {
+  send('log client error: ' + event.message + ' at ' + (event.filename || '?') + ':' + (event.lineno || 0));
+});
 
 // ---- the wire format -------------------------------------------------------------------------
 

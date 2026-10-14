@@ -117,6 +117,29 @@ class WebServerTest {
         }
     }
 
+    @Test
+    fun `reported glyph advances reach the layout`() {
+        val running = start()
+
+        WsClient(port = running.boundPort).use { client ->
+            client.setTimeout(10_000)
+            client.sendText("tick")
+            val before = Decoder.apply(null, first(client))
+
+            // Deliberately wide for a character the page is full of, so everything after it moves.
+            client.sendText("metrics 90 ${'a'.code}:90")
+            client.sendText("keyframe")
+            val after = Decoder.apply(null, first(client))
+
+            assertFalse(
+                before.contentEquals(after),
+                "the advance the client reported did not reach the layout",
+            )
+        }
+    }
+
+    private fun first(client: WsClient): ByteArray = client.readMessage()?.payload ?: error("no frame arrived")
+
     private fun start(): WebServer {
         WebTestRuntime.install()
         val server = WebServer(port = 0, page = "color", initialWidth = 800, initialHeight = 600)
