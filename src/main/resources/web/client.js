@@ -359,6 +359,41 @@ function assetId(words, at) {
   return id;
 }
 
+/**
+ * Fill a projected rectangle, snapped to the pixel grid when it is axis-aligned.
+ *
+ * Adjacent quads are how the framework draws a segmented gradient - the hue bar's six steps, a
+ * slider track's twelve - and filling each as an antialiased path leaves a hairline of background
+ * between them. Growing an axis-aligned fill by half a pixel on every side makes neighbours overlap
+ * instead, and snapping to whole pixels keeps one-pixel lines crisp.
+ */
+function paintBox(points, style) {
+  const box = axisAligned(points);
+  if (!box) {
+    fill(points, style);
+    return;
+  }
+  const [x0, y0, x1, y1] = box;
+  ctx.fillStyle = style;
+  ctx.fillRect(x0 - 0.5, y0 - 0.5, (x1 - x0) + 1, (y1 - y0) + 1);
+}
+
+/** The pixel bounds of a projected rectangle, or null when it is rotated or skewed. */
+function axisAligned(points) {
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const x0 = Math.min(...xs);
+  const x1 = Math.max(...xs);
+  const y0 = Math.min(...ys);
+  const y1 = Math.max(...ys);
+  for (const point of points) {
+    const onX = Math.abs(point[0] - x0) < 0.05 || Math.abs(point[0] - x1) < 0.05;
+    const onY = Math.abs(point[1] - y0) < 0.05 || Math.abs(point[1] - y1) < 0.05;
+    if (!onX || !onY) return null;
+  }
+  return [x0, y0, x1, y1];
+}
+
 function quad(words, at, transform) {
   const points = corners(words, at + 1, transform);
   if (!points) return;
@@ -378,15 +413,17 @@ function quad(words, at, transform) {
       const right = floatOf(words[at + 3]), bottom = floatOf(words[at + 4]);
       ctx.save();
       ctx.setTransform(transform[0], transform[3], transform[1], transform[4], transform[2], transform[5]);
+      // Textures are scaled like the game scales them: nearest neighbour, not a blur.
+      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(image, u0, v0, u1 - u0, v1 - v0, left, top, right - left, bottom - top);
       ctx.restore();
       return;
     }
-    fill(points, 'rgba(140,140,140,0.6)');
+    paintBox(points, 'rgba(140,140,140,0.6)');
     return;
   }
   if (lt === rt && lt === lb && lt === rb) {
-    fill(points, css(lt));
+    paintBox(points, css(lt));
     return;
   }
   // Axis-aligned colour ramps are what the pickers use, and a gradient is exact for those.
@@ -394,14 +431,14 @@ function quad(words, at, transform) {
     const gradient = ctx.createLinearGradient(points[0][0], points[0][1], points[1][0], points[1][1]);
     gradient.addColorStop(0, css(lt));
     gradient.addColorStop(1, css(rt));
-    fill(points, gradient);
+    paintBox(points, gradient);
     return;
   }
   if (lt === rt && lb === rb) {
     const gradient = ctx.createLinearGradient(points[0][0], points[0][1], points[3][0], points[3][1]);
     gradient.addColorStop(0, css(lt));
     gradient.addColorStop(1, css(lb));
-    fill(points, gradient);
+    paintBox(points, gradient);
     return;
   }
   // Otherwise the two triangles the game's backends draw, for the same reason: four unrelated
@@ -451,7 +488,9 @@ function shadeTriangle(points, colours) {
     points[0][0], points[0][1],
   );
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(field, 0, 0, 2, 2, 0, 0, 1, 1);
+  // The whole field, not a corner of it: sampling a two-by-two source rectangle out of a sixteen
+  // square drew the colour of one corner and made every palette flat.
+  ctx.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
   ctx.restore();
 }
 
@@ -539,7 +578,7 @@ function text(words, at, transform) {
 function item(words, at, transform) {
   const points = corners(words, at + 1, transform);
   if (!points) return;
-  fill(points, '#3a3a44');
+  paintBox(points, '#3a3a44');
   ctx.strokeStyle = '#8a8a8a';
   ctx.beginPath();
   path(points);
@@ -548,7 +587,7 @@ function item(words, at, transform) {
 
 function box(words, at, transform, colour) {
   const points = corners(words, at + 1, transform);
-  if (points) fill(points, colour);
+  if (points) paintBox(points, colour);
 }
 
 function average(colours) {
