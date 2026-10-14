@@ -1,0 +1,59 @@
+package io.github.u2894638479.kotlinmcuiweb
+
+import io.github.u2894638479.kotlinmcui.container.DslChild
+import io.github.u2894638479.kotlinmcui.container.DslDataStore
+import io.github.u2894638479.kotlinmcui.container.TopComponent
+import io.github.u2894638479.kotlinmcui.dsl.DslFunction
+
+/**
+ * One page of the web UI: the framework screen and the state that belongs to it.
+ *
+ * The framework wants two things from a screen - a [DslDataStore] and a [io.github.u2894638479.kotlinmcui.container.DslScreen]
+ * - and this is where both come from, exactly as in the other backends. Nothing here knows about a
+ * socket, a canvas or a browser: it is the same object either way, and the transport drives
+ * [WebBackend.frame] on whatever surface size the client reports.
+ *
+ * Closing the page does not release it: the close action only unmounts, so a page that is hidden
+ * keeps everything it declared with `stable` and can be shown again. [release] is the other thing,
+ * and only the backend (or the host) calls it.
+ */
+class WebScreen internal constructor(
+    backend: WebBackend,
+    val title: String,
+    dslFunction: DslFunction,
+) {
+    private var child: DslChild? = null
+    private var released = false
+
+    val dataStore = DslDataStore(backend, title, { unmount() }, dslFunction)
+
+    val dslScreen = dataStore.dslScreen
+
+    /**
+     * Make this page the tree the next frame renders.
+     *
+     * The shared child list is appended to rather than rebuilt, because the framework's overlay
+     * layer is collected into it once and dropping the list would take the overlays with it.
+     */
+    internal fun mount() {
+        check(!released) { "page '$title' was released and cannot be shown again" }
+        if (child != null) return
+        child = TopComponent.children.collect(dslScreen)
+    }
+
+    /** Take the page out of the rendered tree, leaving what it declared in place. */
+    internal fun unmount() {
+        val mounted = child ?: return
+        child = null
+        TopComponent.children.remove(mounted)
+    }
+
+    /** End the page and close its framework screen, which releases everything it scoped. */
+    internal fun release() {
+        if (released) return
+        released = true
+        unmount()
+        WebBackend.forget(this)
+        dslScreen.close()
+    }
+}
