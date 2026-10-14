@@ -138,6 +138,22 @@ class WebServerTest {
         }
     }
 
+    @Test
+    fun `a wheel event with shift held shows up as the shift key`() {
+        val running = start()
+
+        WsClient(port = running.boundPort).use { client ->
+            client.setTimeout(5_000)
+            // The framework asks isKeyDown(LEFT_SHIFT) - the polled half of input - to decide whether a
+            // vertical wheel may scroll a horizontal scroller, so the modifier flag has to reach it.
+            client.sendText("wheel 0 -100 1")
+            assertTrue(await { WebInput.isKeyDown(Key.LEFT_SHIFT) }, "the shift flag did not reach the polled state")
+
+            client.sendText("wheel 0 -100 0")
+            assertTrue(await { !WebInput.isKeyDown(Key.LEFT_SHIFT) }, "the shift key never came up")
+        }
+    }
+
     private fun first(client: WsClient): ByteArray = client.readMessage()?.payload ?: error("no frame arrived")
 
     private fun start(): WebServer {

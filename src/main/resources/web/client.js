@@ -27,6 +27,11 @@ const Op = {
 const IDLE_MILLIS = 120;
 const NO_CHANGE = 0x4e;
 
+// `WheelEvent.deltaMode` is a unit, not a size: one line is about this many pixels, one page about
+// that many. Only Firefox and a few configurations use them; Chrome reports pixels.
+const LINE_PIXELS = 40;
+const PAGE_PIXELS = 400;
+
 const canvas = document.getElementById('screen');
 const status = document.getElementById('status');
 const ctx = canvas.getContext('2d');
@@ -435,7 +440,11 @@ canvas.addEventListener('pointerup', (event) => {
 });
 
 canvas.addEventListener('wheel', (event) => {
-  send('wheel ' + Math.round(event.deltaX) + ' ' + Math.round(event.deltaY) + ' ' + modifiers(event));
+  // The wheel's deltas come in pixels, lines or pages depending on the browser and the device, so
+  // they are normalised to pixels here; the server turns pixels into notches, which is the unit the
+  // framework's scroll is in.
+  const unit = event.deltaMode === 1 ? LINE_PIXELS : event.deltaMode === 2 ? PAGE_PIXELS : 1;
+  send('wheel ' + Math.round(event.deltaX * unit) + ' ' + Math.round(event.deltaY * unit) + ' ' + modifiers(event));
   event.preventDefault();
   wake();
 }, { passive: false });

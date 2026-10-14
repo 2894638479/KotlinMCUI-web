@@ -240,9 +240,17 @@ internal class WebServer(
             }
             "wheel" -> {
                 WebInput.modifiers(modifiersOf(parts.getOrNull(3)?.toIntOrNull()))
-                val horizontal = parts.getOrNull(3)?.toIntOrNull()?.and(1) == 1
-                if (horizontal) WebInput.scrolled(number(parts, 1) / WHEEL_STEP, true)
-                else WebInput.scrolled(number(parts, 2) / WHEEL_STEP, false)
+                val horizontal = number(parts, 1)
+                val vertical = number(parts, 2)
+                // The framework counts wheel notches upwards - the direction GLFW reports in, which is
+                // why the window backend negates AWT's - so both axes arrive negated here as well.
+                // An event that carries a horizontal delta is horizontal (a trackpad, or a browser that
+                // already swapped the axes for a held shift); otherwise it is a plain vertical wheel,
+                // and the framework routes it to a horizontal scroller itself while shift is down.
+                when {
+                    horizontal != 0.0 -> WebInput.scrolled(-horizontal / WHEEL_STEP, true)
+                    vertical != 0.0 -> WebInput.scrolled(-vertical / WHEEL_STEP, false)
+                }
             }
             "key" -> {
                 val key = keyOf(parts.getOrNull(1) ?: return) ?: return

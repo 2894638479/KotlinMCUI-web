@@ -46,6 +46,23 @@ internal object WebInput : DslBackendInput {
     /** The modifier state that arrives with each event, as the client last reported it. */
     fun modifiers(value: KeyModifiers) {
         modifiers = value
+        // The framework does not only read modifiers from the event context: a horizontal scroller
+        // accepts a *vertical* wheel when `isKeyDown(LEFT_SHIFT)` is true, which is the polled half of
+        // input. A browser reports modifiers as flags on each event rather than as key events that
+        // always arrive, so the flags are what has to keep the polled state honest.
+        hold(Key.LEFT_SHIFT, Key.RIGHT_SHIFT, value.shift)
+        hold(Key.LEFT_CTRL, Key.RIGHT_CTRL, value.ctrl)
+        hold(Key.LEFT_ALT, Key.RIGHT_ALT, value.alt)
+        hold(Key.LEFT_SUPER, Key.RIGHT_SUPER, value.superKey)
+    }
+
+    private fun hold(left: Key, right: Key, down: Boolean) {
+        if (down) {
+            heldKeys.add(left.code)
+        } else {
+            heldKeys.remove(left.code)
+            heldKeys.remove(right.code)
+        }
     }
 
     fun moved(x: Float, y: Float) {
