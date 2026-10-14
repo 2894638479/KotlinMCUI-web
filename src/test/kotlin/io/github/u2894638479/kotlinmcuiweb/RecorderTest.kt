@@ -1,6 +1,5 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.test.TestColorPage
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -15,14 +14,11 @@ import kotlin.test.assertTrue
  * and the client's replay all do - an op that writes one word too few would desynchronise every
  * reader at once. The second is the whole point of the design: a page nobody is touching repeats
  * itself byte for byte, so its frames cost one byte each.
- *
- * The framework publishes one backend per process and refuses a second install, so the runtime is
- * set up once for the class.
  */
 class RecorderTest {
     @Test
     fun `a frame walks to its own end and a still page repeats it byte for byte`() {
-        ensureRuntime()
+        WebTestRuntime.install()
         WebBackend.create("recorder-test") { TestColorPage() }.show()
 
         val stream = FrameStream()
@@ -35,7 +31,7 @@ class RecorderTest {
     }
 
     private fun frame(stream: FrameStream): ByteArray {
-        WebBackend.frame(WIDTH, HEIGHT)
+        WebTestRuntime.frame()
         val size = Recorder.size
         assertTrue(size > 0, "a page drew nothing")
         walkToEnd(size)
@@ -56,17 +52,4 @@ class RecorderTest {
     }
 
     private lateinit var lastFrame: IntArray
-
-    private fun ensureRuntime() {
-        if (installed) return
-        DslRuntime.install { WebMetadata }
-        DslRuntime.platformReady { WebBackend }
-        installed = true
-    }
-
-    private companion object {
-        var installed = false
-        const val WIDTH = 1280
-        const val HEIGHT = 720
-    }
 }

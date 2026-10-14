@@ -11,6 +11,7 @@ import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
 import io.github.u2894638479.kotlinmcui.test.TestScrollPage
 import io.github.u2894638479.kotlinmcui.test.TestTextPage
 import io.github.u2894638479.kotlinmcui.test.TestTransformPage
+import java.io.File
 
 /**
  * Measures what a web client would have to receive for a page.
@@ -64,6 +65,13 @@ fun main(args: Array<String>) {
         previous = current
     }
     WebBackend.closeAll()
+
+    option(args, "--svg")?.let { path ->
+        val file = File(path)
+        val last = records.last().words
+        SvgWriter.write(last, last.size, width, height, file)
+        println("svg written: ${file.absolutePath} (${file.length()} B)")
+    }
 
     report(page, width, height, records, Recorder.assetCount)
 }
