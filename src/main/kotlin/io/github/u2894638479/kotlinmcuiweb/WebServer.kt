@@ -257,7 +257,15 @@ internal class WebServer(
                 WebInput.modifiers(modifiersOf(parts.getOrNull(3)?.toIntOrNull()))
                 // There is no platform scan code over a socket; the framework's own code is the honest
                 // stand-in, and the components that read it (the game's text box) are not here.
-                if (parts.getOrNull(2) == "down") WebInput.keyPressed(key, key.code) else WebInput.keyReleased(key, key.code)
+                val scanCode = key.code
+                if (parts.getOrNull(2) == "down") {
+                    val consumed = WebInput.keyPressed(key, scanCode)
+                    // Escape leaves the page when nothing on it wanted the key. It is the only way back
+                    // from a page that was entered, and it is the rule the window backend follows too.
+                    if (!consumed && key == Key.ESCAPE) WebBackend.pop()
+                } else {
+                    WebInput.keyReleased(key, scanCode)
+                }
             }
             "char" -> parts.getOrNull(1)?.toIntOrNull()?.let { WebInput.typed(it) }
             "blur" -> WebInput.blur()

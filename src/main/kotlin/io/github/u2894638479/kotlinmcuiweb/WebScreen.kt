@@ -13,9 +13,9 @@ import io.github.u2894638479.kotlinmcui.dsl.DslFunction
  * socket, a canvas or a browser: it is the same object either way, and the transport drives
  * [WebBackend.frame] on whatever surface size the client reports.
  *
- * Closing the page does not release it: the close action only unmounts, so a page that is hidden
- * keeps everything it declared with `stable` and can be shown again. [release] is the other thing,
- * and only the backend (or the host) calls it.
+ * A page is closed by leaving it: the close action pops the stack, so `closeScreen()` and the
+ * framework's own "go back" both end up in the same place. [release] is the other thing - it ends the
+ * page for good - and only the backend calls it.
  */
 class WebScreen internal constructor(
     backend: WebBackend,
@@ -25,7 +25,7 @@ class WebScreen internal constructor(
     private var child: DslChild? = null
     private var released = false
 
-    val dataStore = DslDataStore(backend, title, { unmount() }, dslFunction)
+    val dataStore = DslDataStore(backend, title, { WebBackend.pop() }, dslFunction)
 
     val dslScreen = dataStore.dslScreen
 

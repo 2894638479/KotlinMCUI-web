@@ -1,9 +1,12 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.input.Key
+import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -26,6 +29,15 @@ class WebServerTest {
     @AfterTest
     fun stopServer() {
         server?.stop()
+        // A stopped server must not leave its page on the stack: the tests share a process, and the
+        // next one starts from whatever the last one left behind. Releasing happens on the frame
+        // thread, because the framework's context belongs to the thread that created it.
+        val done = CountDownLatch(1)
+        WebUtils.frameExecutor.execute {
+            WebBackend.closeAll()
+            done.countDown()
+        }
+        done.await(5, TimeUnit.SECONDS)
     }
 
     @Test
@@ -151,6 +163,30 @@ class WebServerTest {
 
             client.sendText("wheel 0 -100 0")
             assertTrue(await { !WebInput.isKeyDown(Key.LEFT_SHIFT) }, "the shift key never came up")
+        }
+    }
+
+    @Test
+    fun `escape leaves the page when nothing on it consumed the key`() {
+        val running = start()
+
+        WsClient(port = running.boundPort).use { client ->
+            client.setTimeout(10_000)
+            client.sendText("tick")
+            assertTrue(client.readMessage() != null, "no frame arrived")
+            val before = WebBackend.pageCount
+
+            // Enter a page the way the entry list does - on the frame thread, where the tree lives.
+            val entered = CountDownLatch(1)
+            WebUtils.frameExecutor.execute {
+                WebBackend.create("second") { TestLayoutPage() }.show()
+                entered.countDown()
+            }
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "the page was never entered")
+            assertEquals(before + 1, WebBackend.pageCount)
+
+            client.sendText("key Escape down 0")
+            assertTrue(await { WebBackend.pageCount == before }, "escape did not leave the page")
         }
     }
 
