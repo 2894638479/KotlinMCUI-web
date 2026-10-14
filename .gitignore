@@ -45,3 +45,6 @@ replay_*.log
 runs/
 # the standalone run's screenshots
 screenshots/
+
+# The framework writes its overlay config under the working directory.
+config/
