@@ -154,4 +154,6 @@ tasks.register<JavaExec>("serve") {
     providers.gradleProperty("page").orNull?.let { args("--page", it) }
     providers.gradleProperty("port").orNull?.let { args("--port", it) }
     providers.gradleProperty("capture").orNull?.let { args("--capture", it) }
+    // The textures the page asks for live in a game installation; without one they stay placeholders.
+    providers.gradleProperty("gameDir").orNull?.let { systemProperty("kotlinmcuiweb.gameDir", it) }
 }

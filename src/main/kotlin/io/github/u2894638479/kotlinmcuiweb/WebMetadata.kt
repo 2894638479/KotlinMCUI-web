@@ -20,9 +20,20 @@ import java.nio.file.Paths
 internal object WebMetadata : DslBackendMetadata {
     const val GAME_VERSION_PROPERTY = "kotlinmcuiweb.gameVersion"
 
+    /**
+     * Where the assets of a game installation are looked for.
+     *
+     * The working directory by default, which is the installation when a host starts this backend
+     * inside one. `-Dkotlinmcuiweb.gameDir=` points it somewhere else, which is what a standalone
+     * server wants: it runs from its own directory but can still serve the textures of an install.
+     */
+    const val GAME_DIR_PROPERTY = "kotlinmcuiweb.gameDir"
+
     private const val STANDALONE = "web"
 
-    override val gameDir: Path get() = Paths.get(System.getProperty("user.dir") ?: ".")
+    override val gameDir: Path get() = System.getProperty(GAME_DIR_PROPERTY)?.takeIf { it.isNotBlank() }
+        ?.let { Paths.get(it) }
+        ?: Paths.get(System.getProperty("user.dir") ?: ".")
 
     override val configDir: Path get() = gameDir.resolve("config")
 
