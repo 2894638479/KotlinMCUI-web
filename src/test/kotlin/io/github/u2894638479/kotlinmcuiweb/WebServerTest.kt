@@ -51,27 +51,26 @@ class WebServerTest {
 
             client.setTimeout(10_000)
             client.sendText("tick")
-            val first = client.readMessage() ?: error("no frame arrived")
-            assertEquals(WsClient.OPCODE_BINARY, first.opcode)
-            assertEquals(Encoder.KEYFRAME, first.payload[0])
+            val first = first(client)
+            assertEquals(Encoder.KEYFRAME, first[0])
 
-            val words = Decoder.apply(null, first.payload)
+            val words = Decoder.apply(null, first)
             assertTrue(words.isNotEmpty())
             walkToEnd(words)
             assertTrue(words.any { it == Op.QUAD } || words.any { it == Op.TEXT }, "the frame drew nothing")
 
             client.sendText("tick")
-            val second = client.readMessage() ?: error("no second frame arrived")
-            assertEquals(Encoder.NOCHANGE, second.payload[0], "a still page was not a one-byte record")
-            assertEquals(1, second.payload.size)
+            val second = first(client)
+            assertEquals(Encoder.NOCHANGE, second[0], "a still page was not a one-byte record")
+            assertEquals(1, second.size)
 
             client.sendText("resize 640 480")
-            val resized = client.readMessage() ?: error("no frame arrived after the resize")
-            assertEquals(Encoder.KEYFRAME, resized.payload[0], "a resize has to start over in full")
-            val resizedWords = Decoder.apply(null, resized.payload)
+            val resized = first(client)
+            assertEquals(Encoder.KEYFRAME, resized[0], "a resize has to start over in full")
+            val resizedWords = Decoder.apply(null, resized)
             walkToEnd(resizedWords)
             assertFalse(
-                Decoder.apply(null, first.payload).contentEquals(resizedWords),
+                Decoder.apply(null, first).contentEquals(resizedWords),
                 "the layout did not change with the size",
             )
         }
@@ -208,7 +207,61 @@ class WebServerTest {
         )
     }
 
-    private fun first(client: WsClient): ByteArray = client.readMessage()?.payload ?: error("no frame arrived")
+    @Test
+    fun `a client that connects later is told the asset table before the frame that uses it`() {
+        val running = start()
+
+        // The first connection's keyframe is where the recorder defines what the page first uses.
+        WsClient(port = running.boundPort).use { first ->
+            first.setTimeout(10_000)
+            first.sendText("tick")
+            assertTrue(first.readMessage() != null, "no frame arrived")
+        }
+
+        // The second one gets no definitions in the frame - the table is the server's - so it has to be
+        // sent separately, or a page's icons stay placeholders for every connection after the first.
+        WsClient(port = running.boundPort).use { second ->
+            second.setTimeout(10_000)
+            second.sendText("tick")
+
+            val table = second.readMessage() ?: error("nothing arrived")
+            assertEquals(Encoder.ASSETS.toInt(), table.payload[0].toInt(), "the table did not come first")
+            val keyframe = second.readMessage() ?: error("no keyframe arrived")
+            assertEquals(Encoder.KEYFRAME.toInt(), keyframe.payload[0].toInt())
+            assertEquals(Recorder.assetTable().size, Encoder.getInt(table.payload, 1), "not the recorder's table")
+        }
+    }
+
+    @Test
+    fun `the asset table round-trips`() {
+        val entries = listOf(0 to "kotlinmcui:icon.png", 1 to "minecraft:diamond_sword")
+        val message = Encoder.assets(entries)
+
+        assertEquals(Encoder.ASSETS.toInt(), message[0].toInt())
+        val parsed = ArrayList<Pair<Int, String>>()
+        val count = Encoder.getInt(message, 1)
+        var at = 5
+        repeat(count) {
+            val index = Encoder.getInt(message, at)
+            val length = Encoder.getInt(message, at + 4)
+            at += 8
+            val id = StringBuilder()
+            repeat(length) {
+                id.appendCodePoint(Encoder.getInt(message, at))
+                at += 4
+            }
+            parsed += index to id.toString()
+        }
+        assertEquals(entries, parsed)
+    }
+
+    /** The next frame. A keyframe is preceded by the asset table, which is not a frame. */
+    private fun first(client: WsClient): ByteArray {
+        while (true) {
+            val message = client.readMessage() ?: error("no frame arrived")
+            if (message.payload[0] != Encoder.ASSETS) return message.payload
+        }
+    }
 
     private fun start(): WebServer {
         WebTestRuntime.install()

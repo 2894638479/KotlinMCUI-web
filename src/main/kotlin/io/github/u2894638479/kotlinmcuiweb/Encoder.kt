@@ -33,11 +33,55 @@ internal object Encoder {
     const val KEYFRAME: Byte = 0x4B
     const val DELTA: Byte = 0x44
 
+    /**
+     * The asset table, sent before a keyframe.
+     *
+     * An id is defined once per *server*, because the table is what keeps a texture reference at one
+     * word. A client that connects later has missed those definitions - its keyframe would reference
+     * assets it has never been told about, which is exactly how the entry list's icon came out as a
+     * placeholder box for every connection after the first. So the table travels again with each one:
+     * definitions first, then the frame that uses them.
+     */
+    const val ASSETS: Byte = 0x41
+
     /** The bytes a keyframe header costs before its words. */
     const val KEYFRAME_HEADER = 9
 
     /** The bytes a delta header costs before its literals. */
     const val DELTA_HEADER = 17
+
+    /** `[0x41, count:u32]` then `index:u32, length:u32, char * length` per asset. */
+    fun assets(entries: List<Pair<Int, String>>): ByteArray {
+        var size = 5
+        for ((_, id) in entries) size += 8 + id.length * 4
+        val message = ByteArray(size)
+        message[0] = ASSETS
+        putInt(message, 1, entries.size)
+        var at = 5
+        for ((index, id) in entries) {
+            putInt(message, at, index)
+            putInt(message, at + 4, id.length)
+            at += 8
+            for (character in id) {
+                putInt(message, at, character.code)
+                at += 4
+            }
+        }
+        return message
+    }
+
+    internal fun putInt(target: ByteArray, at: Int, value: Int) {
+        target[at] = (value and 0xFF).toByte()
+        target[at + 1] = ((value ushr 8) and 0xFF).toByte()
+        target[at + 2] = ((value ushr 16) and 0xFF).toByte()
+        target[at + 3] = ((value ushr 24) and 0xFF).toByte()
+    }
+
+    internal fun getInt(source: ByteArray, at: Int): Int =
+        (source[at].toInt() and 0xFF) or
+            ((source[at + 1].toInt() and 0xFF) shl 8) or
+            ((source[at + 2].toInt() and 0xFF) shl 16) or
+            ((source[at + 3].toInt() and 0xFF) shl 24)
 }
 
 /**

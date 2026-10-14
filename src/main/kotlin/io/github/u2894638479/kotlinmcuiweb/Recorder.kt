@@ -82,6 +82,14 @@ internal object Recorder : DslBackendRenderer<Unit> {
     /** The asset id behind an index, for the report and the SVG writer. */
     fun assetName(index: Int): String? = assets.entries.firstOrNull { it.value == index }?.key
 
+    /**
+     * The whole table, index to id, in index order.
+     *
+     * The definitions a frame emits are the ones it was the first to use; a client that connects
+     * afterwards has missed them, so the transport replays this before a keyframe.
+     */
+    fun assetTable(): List<Pair<Int, String>> = assets.entries.sortedBy { it.value }.map { it.value to it.key }
+
     context(renderParam: Unit)
     override fun flush() {
         put(Op.FLUSH)
