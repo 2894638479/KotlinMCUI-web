@@ -3,6 +3,7 @@ package io.github.u2894638479.kotlinmcuiweb
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 
 /**
@@ -20,8 +21,26 @@ import java.util.zip.ZipFile
  * same handful of ids every frame, and a miss must not mean rescanning a jar sixty times a second.
  */
 internal object WebAssets {
-    private val resolved = HashMap<String, ByteArray>()
-    private val missing = HashSet<String>()
+    /**
+     * Answers, hits and misses alike, reached from every connection's own thread.
+     *
+     * Concurrent containers rather than a lock around the lookup: the mapping is deterministic and
+     * idempotent - an id always resolves to the same answer - so two threads racing to store the same
+     * id write the same thing and neither has a reason to wait. That is also why the pair cannot
+     * disagree: exactly one of the two is written per id, and only with what [lookup] produced.
+     *
+     * This is not defensive tidiness. With plain collections the miss cache was corrupted under
+     * concurrent inserts and threw `ClassCastException` out of the table's own internals - see
+     * `WebAssetsTest`, which exercises exactly this and failed roughly one run in nine before the
+     * containers changed.
+     *
+     * `resolved` holds no null value, which is what lets it be a `ConcurrentHashMap` at all.
+     */
+    private val resolved = ConcurrentHashMap<String, ByteArray>()
+    private val missing = ConcurrentHashMap.newKeySet<String>()
+
+    /** Published whole, so a racing scan is never observed half-built. A double scan is harmless. */
+    @Volatile
     private var jars: List<Path>? = null
 
     /** The bytes of [id], or null when nothing has it. */
