@@ -30,9 +30,12 @@ fun main(args: Array<String>) {
         initialHeight = (option(args, "--height") ?: "720").toInt(),
     )
 
-    server.start()
+    // Bound, but not yet built. Saying so first is what lets a driver launch the browser while the
+    // page is still being constructed.
+    println("kotlinmcui-web: listening on http://127.0.0.1:${server.boundPort}/  (page '$page', Ctrl+C to stop)")
+    System.out.flush()
 
-    println("kotlinmcui-web: http://127.0.0.1:${server.boundPort}/  (page '$page', Ctrl+C to stop)")
+    server.start()
 
     // `--capture=<file>` waits for a browser, asks it for a picture of its canvas, writes it and
     // leaves. It is the acceptance check a person would otherwise do by looking at the screen, and it

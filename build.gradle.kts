@@ -141,8 +141,8 @@ tasks.register<JavaExec>("measure") {
 /**
  * Serves a page to a browser.
  *
- * `-Ppage=<name>` picks the page and `-Pport=<n>` the port (8080 by default); the URL is printed
- * once the page is built, and Ctrl+C stops the process. `-Pcapture=<file>` instead waits for a
+ * `-Ppage=<name>` picks the page and `-Pport=<n>` the port (8080 by default); the URL is printed as
+ * soon as the socket is bound, and Ctrl+C stops the process. `-Pcapture=<file>` instead waits for a
  * browser, asks it to photograph its canvas, writes the PNG and leaves - the acceptance check;
  * `-Pwait=<seconds>` raises how long that waits for a browser to connect before giving up.
  */
