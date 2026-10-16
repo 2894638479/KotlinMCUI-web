@@ -41,6 +41,10 @@ internal class WebServer(
 ) {
     private val server = ServerSocket(port)
     private val sessions = CopyOnWriteArrayList<Session>()
+
+    /** Names a viewer in a log line; with one viewer per root it also names the root. */
+    private val nextSessionId = java.util.concurrent.atomic.AtomicInteger()
+
     private val renderPending = AtomicBoolean(false)
 
     @Volatile
@@ -69,8 +73,22 @@ internal class WebServer(
             ready.countDown()
         }
         ready.await()
-        // `capture` asks the framework for a picture of the client, and this is what answers it.
-        WebUtils.captureSource = { capture() }
+        // `capture` asks the framework for a picture of the client, and this is what answers it. The
+        // framework gets pixels or nothing, so the reason nothing came back is said here, where it can
+        // name the session that was waited on.
+        WebUtils.captureSource = {
+            when (val result = capture()) {
+                is Capture.Answered -> result.png
+                is Capture.NoClient -> {
+                    dslLogger.warn("web server: no browser connected within ${result.waitedMillis} ms, nothing to photograph")
+                    null
+                }
+                is Capture.Unanswered -> {
+                    dslLogger.warn("web server: browser ${result.session} did not answer within ${result.waitedMillis} ms")
+                    null
+                }
+            }
+        }
         acceptLoopThread().start()
         dslLogger.info("web server: page '$page' on http://127.0.0.1:$boundPort/ (${width}x$height)")
     }
@@ -82,6 +100,23 @@ internal class WebServer(
     }
 
     /**
+     * How a capture request ended.
+     *
+     * The two waits are separate because they measure different things: waiting for a browser is the
+     * latency of whoever is meant to launch one, while waiting for its answer is the socket round trip.
+     * Which of the two ran out is the difference between "nothing ever connected" and "something
+     * connected and then went quiet" - two faults with two fixes - and both carry the session, because
+     * with one viewer per root the session *is* the root being captured.
+     */
+    sealed interface Capture {
+        class Answered(val png: ByteArray, val session: Int) : Capture
+
+        class NoClient(val waitedMillis: Long) : Capture
+
+        class Unanswered(val session: Int, val waitedMillis: Long) : Capture
+    }
+
+    /**
      * Ask the browser to photograph its canvas and hand the PNG back.
      *
      * This is where `capture` in [WebUtils] ends up: the pixels only exist in the client, so the
@@ -89,26 +124,32 @@ internal class WebServer(
      * which is the one thing this server accepts on that channel - everything else the client sends
      * is a text command.
      *
-     * Returns null when there is no client, or when it does not answer in time.
+     * The session is picked once and then asked until the answer deadline, rather than re-picked every
+     * second: the outcome names the root it waited on, so it has to be the same one throughout. A
+     * session that leaves mid-wait therefore ends as [Capture.Unanswered] naming it, which is the
+     * honest report - it was asked, and it never answered.
      */
-    fun capture(timeoutMillis: Long = 20_000, waitForClientMillis: Long = 30_000): ByteArray? {
-        val deadline = System.currentTimeMillis() + waitForClientMillis
-        while (sessions.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(50)
-        if (sessions.isEmpty()) return null
+    fun capture(
+        answerMillis: Long = ANSWER_MILLIS,
+        waitForClientMillis: Long = DEFAULT_WAIT_FOR_CLIENT_MILLIS,
+    ): Capture {
+        val clientDeadline = System.currentTimeMillis() + waitForClientMillis
+        while (sessions.isEmpty() && System.currentTimeMillis() < clientDeadline) Thread.sleep(POLL_MILLIS)
+        val session = sessions.firstOrNull() ?: return Capture.NoClient(waitForClientMillis)
         val pending = java.util.concurrent.CompletableFuture<ByteArray>()
         capture = pending
         try {
-            val giveUp = System.currentTimeMillis() + timeoutMillis
+            val giveUp = System.currentTimeMillis() + answerMillis
             while (System.currentTimeMillis() < giveUp) {
                 // A request that arrives before the page has painted is simply ignored, so ask again.
-                sessions.firstOrNull()?.sendText("capture")
-                return try {
-                    pending.get(1, java.util.concurrent.TimeUnit.SECONDS)
+                session.sendText(CAPTURE_COMMAND)
+                try {
+                    return Capture.Answered(pending.get(1, java.util.concurrent.TimeUnit.SECONDS), session.id)
                 } catch (timeout: java.util.concurrent.TimeoutException) {
                     continue
                 }
             }
-            return null
+            return Capture.Unanswered(session.id, answerMillis)
         } finally {
             capture = null
         }
@@ -155,7 +196,7 @@ internal class WebServer(
     }
 
     private fun upgrade(socket: Socket, key: String) {
-        val session = Session(WebSocket(socket))
+        val session = Session(WebSocket(socket), nextSessionId.incrementAndGet())
         session.accept(key)
         sessions += session
         dslLogger.info("web server: a client connected (${sessions.size} connected)")
@@ -337,7 +378,7 @@ internal class WebServer(
 
     private fun number(parts: List<String>, index: Int): Double = parts.getOrNull(index)?.toDoubleOrNull() ?: 0.0
 
-    private inner class Session(private val socket: WebSocket) {
+    private inner class Session(private val socket: WebSocket, val id: Int) {
         private val stream = FrameStream()
 
         /**
@@ -454,21 +495,38 @@ internal class WebServer(
         }
     }
 
-    private companion object {
-        const val MAX_LINE = 8192
+    internal companion object {
+        /** How long a capture waits for a browser to connect before giving up. */
+        const val DEFAULT_WAIT_FOR_CLIENT_MILLIS = 30_000L
+
+        /** How long it then waits for that browser's answer; this is the socket round trip. */
+        const val ANSWER_MILLIS = 20_000L
+
+        /** How often the wait for a browser looks again. */
+        private const val POLL_MILLIS = 50L
+
+        /**
+         * The text command that asks the client for a picture of its canvas.
+         *
+         * The bytes are the client's to interpret, so this string is part of the wire protocol and
+         * has to match what the client script compares against.
+         */
+        private const val CAPTURE_COMMAND = "capture"
+
+        private const val MAX_LINE = 8192
 
         /** Where a client asks for an asset, by the id a frame referenced. */
-        const val ASSET_PATH = "/asset/"
+        private const val ASSET_PATH = "/asset/"
 
         /** Where a browser asks for the tab icon; the framework's own icon answers it. */
-        const val FAVICON_PATH = "/favicon.ico"
+        private const val FAVICON_PATH = "/favicon.ico"
 
-        const val FRAMEWORK_ICON = "kotlinmcui:icon.png"
+        private const val FRAMEWORK_ICON = "kotlinmcui:icon.png"
 
-        const val IMAGE_TYPE = "image/png"
+        private const val IMAGE_TYPE = "image/png"
 
         /** Browsers report wheel deltas in pixels; one notch is a hundred of them, near enough. */
-        const val WHEEL_STEP = 100f
+        private const val WHEEL_STEP = 100f
 
         /**
          * The extension range the framework documents for key codes it does not name.
@@ -477,7 +535,7 @@ internal class WebServer(
          * different every time it was pressed; hashing the DOM code into the extension range is what
          * the framework's own `custom` codes are for.
          */
-        const val CUSTOM_KEY_FLOOR = 1000
+        private const val CUSTOM_KEY_FLOOR = 1000
     }
 
     /** DOM `KeyboardEvent.code` to the framework's key. Physical keys, so no layout is assumed. */

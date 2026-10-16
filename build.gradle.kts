@@ -143,7 +143,8 @@ tasks.register<JavaExec>("measure") {
  *
  * `-Ppage=<name>` picks the page and `-Pport=<n>` the port (8080 by default); the URL is printed
  * once the page is built, and Ctrl+C stops the process. `-Pcapture=<file>` instead waits for a
- * browser, asks it to photograph its canvas, writes the PNG and leaves - the acceptance check.
+ * browser, asks it to photograph its canvas, writes the PNG and leaves - the acceptance check;
+ * `-Pwait=<seconds>` raises how long that waits for a browser to connect before giving up.
  */
 tasks.register<JavaExec>("serve") {
     group = "application"
@@ -154,6 +155,9 @@ tasks.register<JavaExec>("serve") {
     providers.gradleProperty("page").orNull?.let { args("--page", it) }
     providers.gradleProperty("port").orNull?.let { args("--port", it) }
     providers.gradleProperty("capture").orNull?.let { args("--capture", it) }
+    // How long a capture waits for a browser to connect. The default is deliberately not raised for
+    // whichever machine happens to be slow today; a batch that needs longer says so.
+    providers.gradleProperty("wait").orNull?.let { args("--wait", it) }
     // The textures the page asks for live in a game installation; without one they stay placeholders.
     providers.gradleProperty("gameDir").orNull?.let { systemProperty("kotlinmcuiweb.gameDir", it) }
 }

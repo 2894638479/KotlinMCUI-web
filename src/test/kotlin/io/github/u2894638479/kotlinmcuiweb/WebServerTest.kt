@@ -109,8 +109,8 @@ class WebServerTest {
             assertTrue(client.readMessage() != null, "no frame arrived before the capture")
 
             val png = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 1, 2, 3)
-            val answer = CompletableFuture<ByteArray?>()
-            Thread { answer.complete(running.capture(timeoutMillis = 5_000, waitForClientMillis = 2_000)) }
+            val answer = CompletableFuture<WebServer.Capture?>()
+            Thread { answer.complete(running.capture(answerMillis = 5_000, waitForClientMillis = 2_000)) }
                 .apply { isDaemon = true }
                 .start()
 
@@ -125,7 +125,59 @@ class WebServerTest {
                     client.sendBinary(png)
                 }
             }
-            assertContentEquals(png, answer.get(), "the client's answer did not reach the server")
+
+            val captured = answer.get()
+            assertTrue(captured is WebServer.Capture.Answered, "the capture did not end with a picture: $captured")
+            captured as WebServer.Capture.Answered
+            assertContentEquals(png, captured.png, "the client's answer did not reach the server")
+            // One viewer per root, so the outcome has to name the root it photographed.
+            assertEquals(1, captured.session, "the capture did not name the browser it photographed")
+        }
+    }
+
+    /**
+     * A capture with nobody watching has to fail on the *first* wait.
+     *
+     * Both waits ending in the same silent null is what made a slow machine look like a broken page:
+     * the two faults are fixed in different places, so the outcome has to say which one happened, and
+     * a bounded first wait is what keeps the gate from hanging.
+     */
+    @Test
+    fun `a capture with no browser says nothing connected`() {
+        val running = start()
+
+        val started = System.currentTimeMillis()
+        val result = running.capture(answerMillis = 5_000, waitForClientMillis = 200)
+        val waited = System.currentTimeMillis() - started
+
+        assertTrue(result is WebServer.Capture.NoClient, "expected no client, got $result")
+        assertEquals(200, (result as WebServer.Capture.NoClient).waitedMillis, "the outcome lost the wait it gave up on")
+        assertTrue(waited < 3_000, "it gave up on the answer wait instead of the connect wait (waited ${waited}ms)")
+    }
+
+    /**
+     * A browser that connects and then says nothing is a third outcome, and it names the browser.
+     *
+     * This is the case a capture driver sees when the page loaded but the client script did not run -
+     * "connected but silent" is a different fault from "never connected", and the session in the
+     * outcome is what says which root was asked.
+     */
+    @Test
+    fun `a browser that connects and stays quiet is reported as unanswered`() {
+        val running = start()
+
+        WsClient(port = running.boundPort).use { client ->
+            client.setTimeout(2_000)
+            client.sendText("tick")
+            assertTrue(client.readMessage() != null, "no frame arrived before the capture")
+
+            // Deliberately do not answer the capture request the server is about to send.
+            val result = running.capture(answerMillis = 300, waitForClientMillis = 5_000)
+
+            assertTrue(result is WebServer.Capture.Unanswered, "expected an unanswered capture, got $result")
+            result as WebServer.Capture.Unanswered
+            assertEquals(1, result.session, "the outcome did not name the browser it waited on")
+            assertEquals(300, result.waitedMillis, "the outcome lost the wait it gave up on")
         }
     }
 
