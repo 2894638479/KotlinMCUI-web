@@ -39,6 +39,41 @@ const canvas = document.getElementById('screen');
 const status = document.getElementById('status');
 const ctx = canvas.getContext('2d');
 
+// What shows where a page has not painted.
+//
+// The canvas is cleared to transparent and pages do not all cover the surface, so the page's own
+// background colour is part of the picture a user sees. A capture has to reproduce it: `toBlob`
+// exports the canvas alone, so without this the unpainted places come out transparent and a page
+// that reads perfectly well in a browser photographs as a blank one.
+//
+// The colour is read from the document rather than repeated here, so the page's background and the
+// canvas fill cannot drift apart.
+const surface = surfaceColour();
+
+/** The page's background colour, or null when nothing behind the canvas is opaque. */
+function surfaceColour() {
+  for (const element of [document.body, document.documentElement]) {
+    const value = element === null ? null : getComputedStyle(element).backgroundColor;
+    if (value && covers(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * Whether [value] is a colour a browser would actually paint.
+ *
+ * A three-channel `rgb()` is opaque by definition; only `rgba(..., 0)` is not. An unparseable value
+ * has to answer false rather than be handed to `fillStyle`, where an invalid assignment is silently
+ * ignored and the previous fill colour survives - which on a later `fillRect` would paint with
+ * whatever was last used.
+ */
+function covers(value) {
+  const channels = /^rgba?\(([^)]+)\)$/.exec(value);
+  if (!channels) return false;
+  const parts = channels[1].split(',').map((part) => parseFloat(part));
+  return parts.length === 3 || parts[3] !== 0;
+}
+
 // The size the advances are measured at. Everything scales linearly, so a large reference keeps the
 // rounding error small without measuring at every size the page might use.
 const REFERENCE_PX = 90;
@@ -88,6 +123,10 @@ function connect() {
     reportMetrics();
     send('resize ' + canvas.width + ' ' + canvas.height);
     send('keyframe');
+    // Nothing behind the canvas is opaque, so there is nothing to fill a capture with. That is the
+    // honest picture rather than a reason to invent a colour - but it is worth saying out loud,
+    // because a capture of such a page looks blank.
+    if (surface === null) send('log client: the page has no opaque background, a capture will be transparent');
     asking = true;
   };
   socket.onmessage = (event) => {
@@ -283,6 +322,12 @@ function paint() {
   if (!frame) return;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Cleared first and filled second, rather than not clearing at all: the page's colour is allowed to
+  // be translucent, and a transparent page must still be photographed as transparent.
+  if (surface !== null) {
+    ctx.fillStyle = surface;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
   const words = frame;
   let transform = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   const transforms = [];

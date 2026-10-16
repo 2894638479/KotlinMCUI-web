@@ -7,7 +7,11 @@
 <link rel="icon" type="image/png" href="/asset/kotlinmcui%3Aicon.png">
 <title>KotlinMCUI</title>
 <style>
-  /* The canvas is the whole surface; the status line sits on top of it and is never in the way. */
+  /* The canvas is the whole surface; the status line sits on top of it and is never in the way.
+     The background is not decoration: the canvas is transparent wherever a page has not painted, so
+     this colour is what a user sees there. It is the one place the surface colour is written - the
+     client reads it back and fills a capture with it - because `toBlob` exports the canvas alone and
+     a page that is readable here would otherwise photograph as a blank one. */
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #101014; }
   #screen { display: block; touch-action: none; outline: none; }
   #status {
