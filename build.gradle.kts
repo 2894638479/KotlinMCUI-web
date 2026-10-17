@@ -41,14 +41,34 @@ val serializationJson = "org.jetbrains.kotlinx:kotlinx-serialization-json:$seria
 val coroutines = "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutines_version"
 
 /**
- * The core library: the sibling checkout's own jar when it has been built, the published one
- * otherwise. A jar file dependency carries nothing with it, which is why every runtime dependency
- * the core names is listed again below for whatever needs to actually run it.
+ * The core library: the sibling checkout's own products, or the published one when there is no
+ * sibling at all.
+ *
+ * **A sibling checkout present means the published jar is never used.** The old form fell back to
+ * jitpack whenever the local jar was missing, so a half-built sibling - or a stale cache of an older
+ * release - silently compiled this backend against a different core than the one being developed
+ * beside it. Failing here instead costs one command; the silent version once cost a whole green build
+ * that measured the wrong library.
  */
-val coreLibrary: Any = file("../kotlinmcui/build/libs/kotlinmcui-$kotlinmcui_version.jar")
-    .takeIf { it.exists() }
-    ?.let { files(it.path) }
-    ?: "com.github.2894638479:KotlinMCUI:v$kotlinmcui_version"
+val coreLibrary: Any = run {
+    val sibling = rootProject.file("../kotlinmcui")
+    if (!sibling.isDirectory) {
+        // A clean checkout or CI: there is no sibling to build against, so the published core is right.
+        "com.github.2894638479:KotlinMCUI:v$kotlinmcui_version"
+    } else {
+        val jarFile = sibling.resolve("build/libs/kotlinmcui-$kotlinmcui_version.jar")
+        val sourceFile = sibling.resolve("build/libs/kotlinmcui-$kotlinmcui_version-sources.jar")
+        check(jarFile.exists()) {
+            "the local core jar is missing: run ./gradlew jar in ../kotlinmcui " +
+                "(or delete the sibling checkout to build against the published core)"
+        }
+        check(sourceFile.exists()) {
+            "the local core sources jar is missing: run ./gradlew sourcesJar in ../kotlinmcui " +
+                "(or delete the sibling checkout to build against the published core)"
+        }
+        files(jarFile, sourceFile)
+    }
+}
 
 /** What `main()` needs at runtime. Kept out of `runtimeClasspath` so the built jar stays a library. */
 val standalone = configurations.create("standalone") {
