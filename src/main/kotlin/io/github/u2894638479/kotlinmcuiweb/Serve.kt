@@ -22,13 +22,14 @@ fun main(args: Array<String>) {
     val waitSeconds = (option(args, "--wait") ?: (WebServer.DEFAULT_WAIT_FOR_CLIENT_MILLIS / 1000).toString()).toLong()
 
     DslRuntime.install { WebMetadata }
-    WebBackend.adoptRoot()
+    DslRuntime.registerProvider(WebRootProvider)
     // Losing the platform race says one thing only: this process's platform belongs to another
     // backend. It does not stop this one serving its own roots, so there is no early return here -
     // and that is a decision, not an omission.
     if (!DslRuntime.platformReady { WebPlatform }) {
         dslLogger.warn("web: another backend published this process's platform; this one serves its own roots")
     }
+    WebBackend.adoptRoot()
 
     val server = WebServer(
         port = (option(args, "--port") ?: "8080").toInt(),

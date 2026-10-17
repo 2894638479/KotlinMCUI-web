@@ -29,12 +29,13 @@ fun main(args: Array<String>) {
     val height = (option(args, "--height") ?: "720").toInt()
 
     DslRuntime.install { WebMetadata }
-    WebBackend.adoptRoot()
+    DslRuntime.registerProvider(WebRootProvider)
     // Same rule as the serve entry point: a refused publication means the process platform is
     // somebody else's, not that this backend cannot measure its own roots.
     if (!DslRuntime.platformReady { WebPlatform }) {
         dslLogger.warn("web: another backend published this process's platform; measuring on this backend's own roots")
     }
+    WebBackend.adoptRoot()
     // Whatever demo overlays this machine has enabled are switched off for the run: an overlay draws
     // per-frame timings, and a page that reports its own frame time is a page that never repeats
     // itself. The numbers below are meant to be the page's, not the overlay's.

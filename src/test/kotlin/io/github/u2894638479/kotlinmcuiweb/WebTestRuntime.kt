@@ -22,12 +22,14 @@ internal object WebTestRuntime {
     fun install() {
         if (installed) return
         DslRuntime.install { WebMetadata }
-        WebBackend.adoptRoot()
+        DslRuntime.registerProvider(WebRootProvider)
         // A refused publication is not a failure: the process platform belongs to whoever published
         // first, and this backend still serves its own roots.
         if (!DslRuntime.platformReady { WebPlatform }) {
             dslLogger.warn("web tests: another backend published this process's platform")
         }
+        // Only now: `rootFor` needs both a registered provider and a published platform.
+        WebBackend.adoptRoot()
         for (overlay in DslEntryLoader.enabledOverlays) DslEntryLoader.setOverlayEnabled(overlay, false)
         installed = true
     }

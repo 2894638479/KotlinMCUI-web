@@ -91,7 +91,7 @@ class ForeignPlatformTest {
         // Another backend registered first, so the process main root - if anything materialises it - is
         // built from that provider and not from ours.
         DslRuntime.registerProvider(ForeignProvider)
-        WebBackend.adoptRoot()
+        DslRuntime.registerProvider(WebRootProvider)
         assertFalse(
             DslRuntime.platformReady { WebPlatform },
             "a second platform must be refused - one publisher per process",
@@ -101,6 +101,9 @@ class ForeignPlatformTest {
             "losing the platform must not stop this backend registering its provider",
         )
         assertEquals(ForeignPlatform, dslPlatform, "the process platform should be the first publisher")
+
+        // Only after the platform is published: before that, `rootFor` returns a refused root.
+        WebBackend.adoptRoot()
 
         // The production mount path: this is where the backend decides which root its pages live on.
         // It threw before the fix - mounting onto the foreign main root, whose provider cannot create

@@ -67,8 +67,15 @@ object WebBackend {
      * main root", which in a coexistence process belongs to somebody else. Both behave the same today;
      * the difference is who else can see it.
      */
+    /**
+     * Take the root this backend renders into.
+     *
+     * **Only legal after the platform is published and this provider is registered.** Before the
+     * platform exists, `rootFor` hands back a *refused* root, which fails where it is used rather than
+     * where it was asked for - that is what made three test classes red and one hang while waiting for
+     * a frame that could never arrive.
+     */
     internal fun adoptRoot() {
-        DslRuntime.registerProvider(WebRootProvider)
         root = DslRuntime.rootFor(WebRootProvider, ViewerLifetime.PROCESS)
     }
 
