@@ -8,6 +8,7 @@ import io.github.u2894638479.kotlinmcui.container.DslDataStore
 import io.github.u2894638479.kotlinmcui.container.DslScope
 import io.github.u2894638479.kotlinmcui.container.acquireFocusFromInput
 import io.github.u2894638479.kotlinmcui.identity.DslId
+import io.github.u2894638479.kotlinmcui.input.PreeditInfo
 import io.github.u2894638479.kotlinmcui.math.Position
 import io.github.u2894638479.kotlinmcui.math.px
 import io.github.u2894638479.kotlinmcui.math.rect.MutRect
@@ -66,6 +67,23 @@ class SecondRootTest {
         override val rect = MutRect()
         override val modifier: Modifier = Modifier
         override val focusable = true
+
+        /**
+         * What this component was told, so hover and preedit have an observer.
+         *
+         * Both are dispatched down each root's own tree, so recording what arrives reads "whose input
+         * reached whom" directly - no geometry guessing on the assertion side.
+         */
+        val hoverNotes = mutableListOf<DslId?>()
+        val preeditNotes = mutableListOf<PreeditInfo>()
+
+        override fun globalHoverChanged(newHover: DslId?) {
+            hoverNotes += newHover
+        }
+
+        override fun globalPreedit(info: PreeditInfo) {
+            preeditNotes += info
+        }
     }
 
     /** A leaf that records being rendered, and nothing else, so the render claim has an observer. */
@@ -235,5 +253,42 @@ class SecondRootTest {
                 "${thrown?.javaClass?.simpleName}: ${thrown?.message}",
         )
         assertTrue(Recorder.size > 0, "the framework page drew nothing on its own root")
+    }
+
+    /**
+     * Hover is computed per root, but **not yet testable at this level** - and why is worth recording.
+     *
+     * Supporting evidence already gathered: `DslRootComponent.render()` does
+     * `children.forEach { it.rect copyFrom rect }` before the hover pass, so a **direct** child of a
+     * root has the root's own rect - two roots of the same size therefore both contain the pointer and
+     * both hover, which is correct behaviour rather than a defect. Distinguishing them needs the probe
+     * one level deeper, inside a container that keeps its own rect, plus a real surface size on the
+     * recorder (the first attempt read 0x0 because nothing had set it).
+     *
+     * Left out rather than written as a case that cannot fail: a hover assertion made at the direct-child
+     * level would be green for the wrong reason. `preedit goes to the tree it was raised on` covers the
+     * per-root dispatch question in the meantime, and the hover case goes in with the nested probe.
+     */
+    @Test
+    fun `preedit goes to the tree it was raised on`() {
+        WebTestRuntime.install()
+
+        val rootA = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val rootB = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val probeA = probe("preedit-a")
+        val probeB = probe("preedit-b")
+        rootA.children.collect(probeA)
+        rootB.children.collect(probeB)
+
+        rootA.component.globalPreedit(PreeditInfo.empty)
+
+        assertTrue(
+            probeA.preeditNotes.isNotEmpty(),
+            "A's own tree never received the preedit raised on it",
+        )
+        assertTrue(
+            probeB.preeditNotes.isEmpty(),
+            "B's tree received a preedit raised on another root: ${probeB.preeditNotes}",
+        )
     }
 }
