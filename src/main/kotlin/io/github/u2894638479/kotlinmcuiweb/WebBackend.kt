@@ -48,7 +48,12 @@ object WebBackend {
      *
      * The transport owns the frame clock, so it is what says how big the output is; the frame itself
      * belongs to [WebRootProvider]. Keeping the two together here means a caller does not have to know
-     * which object owns which half - and it is the only place in the backend that names the root.
+     * which object owns which half.
+     *
+     * **To be changed when roots become several.** This is the only place in the backend that names
+     * [DslRuntime.ownerRoot]; a multi-root backend has to route a frame to the root the caller meant,
+     * and that routing starts here. Until then, naming the owner root in one method is the single
+     * point of contact this backend wants - not a habit to copy elsewhere.
      */
     internal fun frame(width: Int, height: Int) {
         Recorder.surfaceWidth = width
