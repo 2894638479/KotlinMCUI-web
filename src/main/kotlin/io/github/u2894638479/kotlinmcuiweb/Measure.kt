@@ -2,6 +2,7 @@ package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.entry.DslEntryLoader
+import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import java.io.File
 
 /**
@@ -29,7 +30,11 @@ fun main(args: Array<String>) {
 
     DslRuntime.install { WebMetadata }
     DslRuntime.registerProvider(WebRootProvider)
-    DslRuntime.platformReady { WebPlatform }
+    // Same rule as the serve entry point: a refused publication means the process platform is
+    // somebody else's, not that this backend cannot measure its own roots.
+    if (!DslRuntime.platformReady { WebPlatform }) {
+        dslLogger.warn("web: another backend published this process's platform; measuring on this backend's own roots")
+    }
     // Whatever demo overlays this machine has enabled are switched off for the run: an overlay draws
     // per-frame timings, and a page that reports its own frame time is a page that never repeats
     // itself. The numbers below are meant to be the page's, not the overlay's.

@@ -2,6 +2,7 @@ package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.entry.DslEntryLoader
+import io.github.u2894638479.kotlinmcui.logger.dslLogger
 
 /**
  * The framework's runtime, set up once for the whole test run.
@@ -22,7 +23,11 @@ internal object WebTestRuntime {
         if (installed) return
         DslRuntime.install { WebMetadata }
         DslRuntime.registerProvider(WebRootProvider)
-        DslRuntime.platformReady { WebPlatform }
+        // A refused publication is not a failure: the process platform belongs to whoever published
+        // first, and this backend still serves its own roots.
+        if (!DslRuntime.platformReady { WebPlatform }) {
+            dslLogger.warn("web tests: another backend published this process's platform")
+        }
         for (overlay in DslEntryLoader.enabledOverlays) DslEntryLoader.setOverlayEnabled(overlay, false)
         installed = true
     }

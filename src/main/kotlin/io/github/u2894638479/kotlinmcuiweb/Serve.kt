@@ -1,6 +1,7 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
+import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
@@ -22,7 +23,12 @@ fun main(args: Array<String>) {
 
     DslRuntime.install { WebMetadata }
     DslRuntime.registerProvider(WebRootProvider)
-    DslRuntime.platformReady { WebPlatform }
+    // Losing the platform race says one thing only: this process's platform belongs to another
+    // backend. It does not stop this one serving its own roots, so there is no early return here -
+    // and that is a decision, not an omission.
+    if (!DslRuntime.platformReady { WebPlatform }) {
+        dslLogger.warn("web: another backend published this process's platform; this one serves its own roots")
+    }
 
     val server = WebServer(
         port = (option(args, "--port") ?: "8080").toInt(),
