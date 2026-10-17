@@ -43,10 +43,16 @@ internal class WebServer(
     private val server = ServerSocket(port)
     private val sessions = CopyOnWriteArrayList<Session>()
 
+    /** Connections currently served; a teardown reads it to prove the session it closed is gone. */
+    internal val sessionCount: Int get() = sessions.size
+
     /** Names a viewer in a log line; with one viewer per root it also names the root. */
     private val nextSessionId = java.util.concurrent.atomic.AtomicInteger()
 
     private val renderPending = AtomicBoolean(false)
+
+    /** Whether this server has been stopped; stopping is a one-way, idempotent answer. */
+    private val stopped = AtomicBoolean(false)
 
     @Volatile
     private var width = initialWidth
@@ -95,9 +101,20 @@ internal class WebServer(
     }
 
     fun stop() {
+        if (!stopped.compareAndSet(false, true)) return
+        // The root goes first, and that order is the whole point: a frame already queued for the
+        // frame thread then meets the root's own gate, in the right place, instead of drawing into a
+        // tree nobody is looking at - and a frame that arrives after this fails there too. The gate
+        // deliberately stops no thread; taking the frame thread and the sessions down is this
+        // method's job, which is why it is done here and not by the root.
+        WebBackend.closeRoot()
         WebUtils.captureSource = null
         runCatching { server.close() }
         for (session in sessions) session.close()
+        // Releasing the pages is what disposes their life scopes, and those coroutines run on the
+        // frame thread - so the release is handed there rather than run on this thread. It is also
+        // waited for: a caller told the server stopped must not still have teardown queued behind it.
+        WebUtils.onFrameThread { WebBackend.closeAll() }
     }
 
     /**

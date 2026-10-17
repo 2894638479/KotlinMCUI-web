@@ -78,17 +78,37 @@ object WebBackend {
      *
      * A refused platform publication only says the process platform belongs to another backend - this
      * one still builds its root and serves it, so there is no early return here, and that is a
-     * decision rather than an omission.
+     * decision rather than an omission. The publication is asked **once per process**, because that is
+     * how many times the runtime answers it; building a root is a separate, repeatable act, so a
+     * backend that closed its root can build the next one without re-asking a question already
+     * answered.
      *
      * `DslPreview.start` has to be called explicitly now. It used to ride along with the publication,
      * so leaving it out does not fail loudly - the preview simply never appears.
      */
     internal fun adoptRoot() {
-        if (!DslRuntime.start { WebPlatform }) {
-            dslLogger.warn("web: another backend published this process's platform; this one serves its own root")
+        if (!platformAttempted) {
+            platformAttempted = true
+            if (!DslRuntime.start { WebPlatform }) {
+                dslLogger.warn("web: another backend published this process's platform; this one serves its own root")
+            }
         }
         root = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
         DslPreview.start(root)
+    }
+
+    /** Whether the process platform has already been asked for; the runtime answers only once. */
+    private var platformAttempted = false
+
+    /**
+     * Close this backend's root, if it has one.
+     *
+     * From here on every way of *using* the root - mounting, unmounting, rendering, setting the focus -
+     * fails loudly, while teardown itself carries on. Idempotent, and safe before a root exists
+     * because a server can be stopped without ever having started.
+     */
+    internal fun closeRoot() {
+        if (::root.isInitialized) root.close()
     }
 
     /**
@@ -145,7 +165,15 @@ object WebBackend {
     }
 
     internal fun closeAll() {
-        while (pages.isNotEmpty()) pages.removeLast().release()
+        // A page's own close action asks to leave the page; during teardown that would take the page
+        // below with it, so the same reentrancy guard `pop` uses holds the stack still while this
+        // walks it. The pages are released one by one, and no release may pop another.
+        popping = true
+        try {
+            while (pages.isNotEmpty()) pages.removeLast().release()
+        } finally {
+            popping = false
+        }
     }
 
     private fun push(screen: WebScreen) {

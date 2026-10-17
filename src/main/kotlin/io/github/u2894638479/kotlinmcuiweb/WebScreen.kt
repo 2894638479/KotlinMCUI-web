@@ -44,6 +44,11 @@ class WebScreen internal constructor(
     internal fun unmount() {
         val mounted = child ?: return
         child = null
+        // A closed root is already gone: the tree it held is dead, so unregistering from it is both
+        // meaningless and refused. Teardown closes the root **before** it releases the pages, which
+        // makes this the expected state rather than an inconsistency, and it is why the release path
+        // must not treat the root's refusal as a page fault.
+        if (WebBackend.root.isClosed) return
         WebBackend.root.children.remove(mounted)
     }
 

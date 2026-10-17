@@ -20,7 +20,12 @@ internal object WebTestRuntime {
     private var installed = false
 
     fun install() {
-        if (installed) return
+        if (installed) {
+            // A server that stopped closed the root it rendered into, and the root is the one thing
+            // here that cannot be reused. The next case (or the next server) builds the next one.
+            if (WebBackend.root.isClosed) WebBackend.adoptRoot()
+            return
+        }
         DslRuntime.install { WebMetadata }
         WebBackend.adoptRoot()
         for (overlay in DslEntryLoader.enabledOverlays) DslEntryLoader.setOverlayEnabled(overlay, false)

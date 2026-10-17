@@ -12,8 +12,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
 
 /**
@@ -39,8 +42,24 @@ import javax.imageio.ImageIO
  * across two objects would only move the same fields around.
  */
 internal object WebUtils : DslPlatformUtils, DslRootUtils {
-    private val frameThread = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "kotlinmcui-web").apply { isDaemon = true }
+    @Volatile
+    private var frameThreadRef: Thread? = null
+
+    /**
+     * The one thread the framework lives on, kept as the pool rather than as an `Executor` so
+     * teardown can ask what is still queued for it.
+     */
+    private val framePool = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+    ) { runnable ->
+        Thread(runnable, FRAME_THREAD_NAME).apply {
+            isDaemon = true
+            frameThreadRef = this
+        }
     }
 
     /**
@@ -48,7 +67,50 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
      * input. Exposed as an [java.util.concurrent.Executor] because a transport wants to hand work to
      * it rather than suspend on it.
      */
-    internal val frameExecutor: Executor get() = frameThread
+    internal val frameExecutor: Executor get() = framePool
+
+    /** Whether the calling thread is the frame thread, which decides between inline and hand-off. */
+    internal val isFrameThread: Boolean get() = Thread.currentThread() === frameThreadRef
+
+    /**
+     * Work queued on the frame thread and not started yet.
+     *
+     * A teardown that hands the page release to the frame thread waits for it, so this reads zero
+     * once the backend is actually finished. It is an observable and not a private detail because
+     * "the executor side was reclaimed" is otherwise a claim no test can check.
+     */
+    internal val pendingFrameTasks: Int get() = framePool.queue.size
+
+    /**
+     * Run [block] on the frame thread and wait for it, or inline when already there.
+     *
+     * The framework's contexts belong to the thread that created them, so releasing a page - which
+     * disposes its life scopes and their session coroutines - has to happen on the frame thread.
+     * A caller of `stop()` needs it synchronously: a backend that has said it stopped must not still
+     * have teardown queued behind it.
+     */
+    internal fun onFrameThread(block: () -> Unit) {
+        if (isFrameThread) {
+            block()
+            return
+        }
+        val done = CountDownLatch(1)
+        var failure: Throwable? = null
+        framePool.execute {
+            try {
+                block()
+            } catch (throwable: Throwable) {
+                failure = throwable
+            } finally {
+                done.countDown()
+            }
+        }
+        if (!done.await(FRAME_JOIN_MILLIS, TimeUnit.MILLISECONDS)) {
+            dslLogger.warn("web utils: the frame thread did not finish teardown within ${FRAME_JOIN_MILLIS} ms")
+            return
+        }
+        failure?.let { throw it }
+    }
 
     private val localImages = HashMap<String, ImageHolder>()
 
@@ -186,7 +248,7 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
         dslLogger.info("web utils: asked to open '$uri', which only the client can do")
     }
 
-    override val sessionDispatcher: CoroutineDispatcher = frameThread.asCoroutineDispatcher()
+    override val sessionDispatcher: CoroutineDispatcher = framePool.asCoroutineDispatcher()
 
     /**
      * Photograph the client's canvas.
@@ -217,4 +279,10 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
 
     /** Ids this backend mints for a file it described; only those may be served as a file. */
     internal const val LOCAL_PREFIX = "local:"
+
+    /** The frame thread's name, which a log line and a thread dump both use to identify it. */
+    private const val FRAME_THREAD_NAME = "kotlinmcui-web"
+
+    /** How long a teardown waits for the frame thread before saying so and giving up. */
+    private const val FRAME_JOIN_MILLIS = 10_000L
 }
