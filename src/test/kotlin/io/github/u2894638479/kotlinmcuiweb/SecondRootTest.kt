@@ -104,6 +104,20 @@ class SecondRootTest {
         }
     }
 
+    /**
+     * A container that is a direct child of a root, so its own child keeps its own rect.
+     *
+     * The root writes its rect onto its **direct** children every frame; a container below that level
+     * keeps its children's rects, which is the only way two roots can differ geometrically.
+     */
+    private class ProbeBox(override val identity: DslId) : DslScope {
+        override var instance: DslComponent = this
+        override val children = DslChild.Group()
+        override val rect = MutRect()
+        override val modifier: Modifier = Modifier
+        override val scale: Double = 1.0
+    }
+
     /** A probe that covers the point the tests press at, so the root's own hit test finds it. */
     private fun probe(name: String): FocusProbe = FocusProbe(DslId(name), 1.0).apply {
         rect.left = 0.px
@@ -256,18 +270,67 @@ class SecondRootTest {
     }
 
     /**
-     * Hover is computed per root, but **not yet testable at this level** - and why is worth recording.
+     * Hover is computed per root, from the pointer and that root's **own** tree.
      *
-     * Supporting evidence already gathered: `DslRootComponent.render()` does
-     * `children.forEach { it.rect copyFrom rect }` before the hover pass, so a **direct** child of a
-     * root has the root's own rect - two roots of the same size therefore both contain the pointer and
-     * both hover, which is correct behaviour rather than a defect. Distinguishing them needs the probe
-     * one level deeper, inside a container that keeps its own rect, plus a real surface size on the
-     * recorder (the first attempt read 0x0 because nothing had set it).
+     * Two layout facts decide how this has to be written, and both were found the hard way:
+     * - `render()` copies the root's rect onto every **direct** child (`children.forEach { it.rect
+     *   copyFrom rect }`) before the hover pass, so a direct child always covers the whole surface.
+     *   Two roots of the same size would therefore both hover - correct behaviour, useless as a test.
+     *   The probe is nested inside a container, which keeps its own rect.
+     * - The surface size has to be set on the recorder first, or the root rect degenerates to 0x0 and
+     *   the pointer position means nothing.
      *
-     * Left out rather than written as a case that cannot fail: a hover assertion made at the direct-child
-     * level would be green for the wrong reason. `preedit goes to the tree it was raised on` covers the
-     * per-root dispatch question in the meantime, and the hover case goes in with the nested probe.
+     * Falsifier: frame the process owner root instead of A's, or point the assertion at the owner
+     * root's tree, and A's probe stays empty - the case goes red.
+     */
+    @Test
+    fun `hover follows each root's own tree`() {
+        WebTestRuntime.install()
+
+        val rootA = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val rootB = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val probeA = probe("hover-a")
+        val probeB = probe("hover-b").apply {
+            rect.left = 200.px
+            rect.right = 300.px
+            rect.top = 200.px
+            rect.bottom = 300.px
+        }
+        val boxA = ProbeBox(DslId("box-a"))
+        val boxB = ProbeBox(DslId("box-b"))
+        boxA.children.collect(probeA)
+        boxB.children.collect(probeB)
+        rootA.children.collect(boxA)
+        rootB.children.collect(boxB)
+
+        // A real surface, or the root rect is 0x0 and the pointer is nowhere.
+        Recorder.surfaceWidth = 800
+        Recorder.surfaceHeight = 600
+        WebInput.mouse = Position(10.px, 10.px)
+
+        WebRootProvider.frame(rootA, Unit)
+        WebRootProvider.frame(rootB, Unit)
+
+        assertTrue(
+            probeA.hoverNotes.contains(probeA.identity),
+            "A's own tree never reported the component under the pointer",
+        )
+        // B is told "nothing is hovered" - `setHovered(null)` dispatches even when the value does not
+        // change, so requiring silence would be wrong. What must never happen is B learning A's id.
+        assertTrue(
+            probeB.hoverNotes.none { it == probeA.identity },
+            "B's tree was told about A's component: ${probeB.hoverNotes}",
+        )
+        assertTrue(
+            probeB.hoverNotes.all { it == null },
+            "B's own geometry contains nothing, so it may only ever hear 'nothing is hovered': ${probeB.hoverNotes}",
+        )
+    }
+
+    /**
+     * Preedit raised on one root reaches that root's tree and no other.
+     *
+     * Falsifier: raise it on the other root and A's notes stay empty.
      */
     @Test
     fun `preedit goes to the tree it was raised on`() {
