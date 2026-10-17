@@ -25,8 +25,17 @@ import kotlin.test.assertTrue
  * own roots, or drawing pages - which is the whole point of "translate comes from the platform,
  * rendering comes from the root".
  *
- * This class is deliberately not built on `WebTestRuntime`: that helper publishes the web platform,
- * and this case needs to lose the race on purpose, from a fresh JVM (`forkEvery = 1` gives it one).
+ * **Why this needs its own JVM, and why that is load-bearing rather than incidental.** `DslRuntime`
+ * is a process singleton: `install` runs once, `platformReady` publishes once, and the first
+ * publication wins for the life of the process. A JVM that has already published the web platform can
+ * therefore never lose the race - it would see `true` where this case needs `false`, and the case
+ * would pass while proving nothing. So the requirement is a **fresh process**, and `forkEvery = 1`
+ * in the build is what provides it. The class must also not go through `WebTestRuntime`, because that
+ * helper's whole job is to publish the web platform; it builds its own runtime from the starting
+ * state instead.
+ *
+ * If the build ever stops forking per class, this case becomes quietly meaningless rather than
+ * failing - which is why the dependency is written down here.
  */
 class ForeignPlatformTest {
 

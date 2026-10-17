@@ -211,3 +211,25 @@ size 与 sha256 相同），另两轮与它逐行一致。二是 web 仓这边�
   `dslPlatform` 是别人的。三个发布点都**不**在 `false` 上早退，只记一条 warn 说明平台归谁；
   这条由 `ForeignPlatformTest` 钉住（先发布一个外来平台，再断言注册、建根、渲染、以及
   `store.platform` 仍是本端的）。
+
+## 如何验证"两个后端同进程共存"
+
+将来重验这件事，按下面这套走，不必重新发明：
+
+1. **独立的测试类 + 独立 JVM**。`DslRuntime` 是进程单例：`install` 一次、`platformReady` 只发布一次、
+   **先发布者终身获胜**。已经发布过本端平台的 JVM **永远赢不了**这场竞争，所以用例会拿到 `true` 而不是
+   需要验的 `false` —— **会静默变成一条什么也没证明的绿灯**。本仓靠 `build.gradle.kts` 里的
+   `forkEvery = 1` 提供"每个测试类一个新进程"，**这不是可有可无的配置**。
+2. **不要走 `WebTestRuntime`**：它的职责就是发布本端平台。共存用例自建运行时。
+3. **先发布一个外来平台**（自己实现一个 `DslPlatform`，`utils.translate` 返回可识别的字符串），
+   断言它**赢了**。
+4. **然后推本端**：`registerProvider` → `platformReady { 本端平台 }` ⇒ 断言返回 **`false`**，
+   并断言 `registeredProviders` 里**有**本端 provider。
+5. **在本端建根、建屏、渲染**：`createRoot(provider, TRANSIENT)` → `DslDataStore(本端平台, provider, …)`
+   → `children.collect` → `WebRootProvider.frame(root, Unit)` ⇒ 断言帧非空。
+6. **两条身份断言是这个场景的全部意义**：
+   - `store.platform === 本端平台`（页面问世界状态问的是**自己**的平台）；
+   - `dslPlatform === 外来平台`（进程级只认第一发布者）。
+   ⇒ 合起来才是"**平台归进程、渲染归根**"。
+7. **失败时最先看**：`platformReady` 是不是返回了 `true`（说明 JVM 被污染了，或用例跑在了别人之后）。
+   这一条比断言消息更能定位问题。
