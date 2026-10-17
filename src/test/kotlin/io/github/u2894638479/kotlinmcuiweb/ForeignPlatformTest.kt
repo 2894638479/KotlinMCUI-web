@@ -1,10 +1,16 @@
 package io.github.u2894638479.kotlinmcuiweb
 
+import io.github.u2894638479.kotlinmcui.backend.DslBackendInput
 import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
+import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
 import io.github.u2894638479.kotlinmcui.backend.DslPlatform
+import io.github.u2894638479.kotlinmcui.backend.DslRootProvider
+import io.github.u2894638479.kotlinmcui.backend.DslRootScreenFactory
+import io.github.u2894638479.kotlinmcui.backend.DslRootUtils
 import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.backend.dslPlatform
+import io.github.u2894638479.kotlinmcui.container.DslRoot
 import io.github.u2894638479.kotlinmcui.container.DslDataStore
 import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
@@ -57,6 +63,15 @@ class ForeignPlatformTest {
         override val dispatcher = WebUtils.sessionDispatcher
     }
 
+    /** A provider another backend registered first; the process main root would be built from it. */
+    private object ForeignProvider : DslRootProvider<Nothing, Nothing> {
+        override val renderer: DslBackendRenderer<Nothing>? get() = null
+        override val input: DslBackendInput get() = error("not this backend")
+        override val screenFactory: DslRootScreenFactory<Nothing>? get() = null
+        override val rootUtils: DslRootUtils get() = error("not this backend")
+        override fun frame(root: DslRoot, renderParam: Nothing) = error("not this backend")
+    }
+
     /**
      * A backend that lost the platform race still serves its own roots and pages.
      *
@@ -73,7 +88,10 @@ class ForeignPlatformTest {
             "the foreign platform should have won the publication",
         )
 
-        DslRuntime.registerProvider(WebRootProvider)
+        // Another backend registered first, so the process main root - if anything materialises it - is
+        // built from that provider and not from ours.
+        DslRuntime.registerProvider(ForeignProvider)
+        WebBackend.adoptRoot()
         assertFalse(
             DslRuntime.platformReady { WebPlatform },
             "a second platform must be refused - one publisher per process",
@@ -83,6 +101,18 @@ class ForeignPlatformTest {
             "losing the platform must not stop this backend registering its provider",
         )
         assertEquals(ForeignPlatform, dslPlatform, "the process platform should be the first publisher")
+
+        // The production mount path: this is where the backend decides which root its pages live on.
+        // It threw before the fix - mounting onto the foreign main root, whose provider cannot create
+        // screens - so reaching the frame below is already part of the evidence.
+        WebBackend.create("mine") { TestLayoutPage() }.show()
+
+        // The production frame path, and a frame-content assertion: rect alone would only prove the
+        // path was called, not whose tree it recorded.
+        Recorder.surfaceWidth = 800
+        Recorder.surfaceHeight = 600
+        WebBackend.frame(800, 600)
+        assertTrue(Recorder.size > 0, "the production frame path drew nothing from this backend's own page")
 
         val root = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
         with(DslRuntime) {

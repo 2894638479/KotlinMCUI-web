@@ -2,6 +2,8 @@ package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslBackendScreenHolder
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
+import io.github.u2894638479.kotlinmcui.container.DslRoot
+import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
 
 /**
@@ -44,21 +46,46 @@ object WebBackend {
         }
 
     /**
-     * One frame, recorded, for the process owner root.
+     * This backend's own root: the process main root when it is ours, otherwise a root of our own.
+     *
+     * A coexistence process has more than one backend, and the process main root is built from
+     * whichever provider registered first - so it is not necessarily ours, and rendering into it
+     * would draw somebody else's tree. [adoptRoot] decides once, at startup, and everything else here
+     * follows this field.
+     */
+    internal lateinit var root: DslRoot
+        private set
+
+    /**
+     * Claim the root this backend will render into.
+     *
+     * The decision has to be made **before** registering, because the provider list is the only signal
+     * for whether the main root will be built from ours; `DslRoot.provider` is internal to the core and
+     * cannot be compared from here.
+     *
+     * When the main root is not ours, this backend gets **its own process-lifetime root** - not "the
+     * main root", which in a coexistence process belongs to somebody else. Both behave the same today;
+     * the difference is who else can see it.
+     */
+    internal fun adoptRoot() {
+        DslRuntime.registerProvider(WebRootProvider)
+        root = DslRuntime.rootFor(WebRootProvider, ViewerLifetime.PROCESS)
+    }
+
+    /**
+     * One frame, recorded, for [root].
      *
      * The transport owns the frame clock, so it is what says how big the output is; the frame itself
      * belongs to [WebRootProvider]. Keeping the two together here means a caller does not have to know
      * which object owns which half.
      *
-     * **To be changed when roots become several.** This is the only place in the backend that names
-     * [DslRuntime.ownerRoot]; a multi-root backend has to route a frame to the root the caller meant,
-     * and that routing starts here. Until then, naming the owner root in one method is the single
-     * point of contact this backend wants - not a habit to copy elsewhere.
+     * **To be changed when roots become several.** This is the only place that picks which root a frame
+     * goes to; a multi-root backend routes there instead.
      */
     internal fun frame(width: Int, height: Int) {
         Recorder.surfaceWidth = width
         Recorder.surfaceHeight = height
-        WebRootProvider.frame(DslRuntime.ownerRoot, Unit)
+        WebRootProvider.frame(root, Unit)
     }
 
     /**

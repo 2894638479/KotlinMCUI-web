@@ -29,7 +29,7 @@ fun main(args: Array<String>) {
     val height = (option(args, "--height") ?: "720").toInt()
 
     DslRuntime.install { WebMetadata }
-    DslRuntime.registerProvider(WebRootProvider)
+    WebBackend.adoptRoot()
     // Same rule as the serve entry point: a refused publication means the process platform is
     // somebody else's, not that this backend cannot measure its own roots.
     if (!DslRuntime.platformReady { WebPlatform }) {

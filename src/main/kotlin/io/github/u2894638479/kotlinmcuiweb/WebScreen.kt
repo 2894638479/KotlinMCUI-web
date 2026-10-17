@@ -37,14 +37,14 @@ class WebScreen internal constructor(
     internal fun mount() {
         check(!released) { "page '$title' was released and cannot be shown again" }
         if (child != null) return
-        child = DslRuntime.ownerRoot.children.collect(dslScreen)
+        child = WebBackend.root.children.collect(dslScreen)
     }
 
     /** Take the page out of the rendered tree, leaving what it declared in place. */
     internal fun unmount() {
         val mounted = child ?: return
         child = null
-        DslRuntime.ownerRoot.children.remove(mounted)
+        WebBackend.root.children.remove(mounted)
     }
 
     /** End the page and close its framework screen, which releases everything it scoped. */
