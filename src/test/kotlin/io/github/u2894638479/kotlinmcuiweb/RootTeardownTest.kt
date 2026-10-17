@@ -11,7 +11,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * What a disconnect does to the root, the executor and the pages.
+ * What a disconnect does to the root, the frame thread it draws on, and the pages.
  *
  * A web backend has one frame thread and one root, and a server that stops has to end both without
  * leaving the tree half-torn. The two rulings pinned here are the ones a teardown can get wrong
@@ -21,10 +21,12 @@ import kotlin.test.assertTrue
  *   teardown that only released the pages would let that frame reach the page and fail on
  *   `check(!released)` instead - a message about a page when the truth is that the whole output is
  *   gone. The root's gate names the thing that actually ended.
- * - **After the close, nothing on the executor side records anything.** Releasing the pages is what
- *   cancels their session-scoped coroutines, so it has to happen, has to happen on the frame thread
- *   (that is where the framework's contexts live), and `stop()` has to wait for it: a caller that is
- *   told the server stopped must not still have work queued behind it.
+ * - **Closing the root reclaims the session resources it scoped; the frame thread pool does not go
+ *   with it.** Releasing the pages disposes their life scopes and the coroutines running on the
+ *   session dispatcher, so it happens on the frame thread (that is where the framework's contexts
+ *   live) and `stop()` waits for it: a caller told the server stopped must not still have teardown
+ *   queued behind it. The pool itself is process-wide - the root's lifetime governs the tree, not
+ *   the thread that draws it, and a later server renders on the same one.
  */
 class RootTeardownTest {
     private var server: WebServer? = null
@@ -99,14 +101,18 @@ class RootTeardownTest {
     }
 
     /**
-     * After the close, the executor side holds no more work, the session is gone, and a frame fed in
-     * afterwards records nothing.
+     * Closing the root reclaims the session resources, and the process-wide frame thread survives it.
+     *
+     * The pool is deliberately **not** torn down with the root: it is process-wide, `sessionDispatcher`
+     * is built on it, and the framework's contexts belong to the thread that created them - so "one
+     * server stopped" may not take the thread a later server renders on. Asserting the survival is
+     * what stops a future cleanup from shutting it down and calling that reclamation.
      *
      * `Recorder.size` is the assertion that matters for the wire: a frame that never reached the
      * tree must leave the buffer empty, or a client would be sent a frame built from a torn tree.
      */
     @Test
-    fun `the disconnect reclaims the executor-side session work and a fed frame records nothing`() {
+    fun `the disconnect reclaims the session work and leaves the process-wide frame thread alive`() {
         val running = start()
         val client = WsClient(port = running.boundPort)
         try {
@@ -121,9 +127,14 @@ class RootTeardownTest {
             assertEquals(0, WebBackend.pageCount, "the disconnect left a page on the stack")
             assertTrue(
                 await { WebUtils.pendingFrameTasks == 0 },
-                "the frame executor still holds the teardown",
+                "the session teardown is still queued on the frame thread",
             )
             assertTrue(await { running.sessionCount == 0 }, "the session outlived the disconnect")
+
+            // The pool outlives the root on purpose: a later server renders on this same thread.
+            val later = CountDownLatch(1)
+            WebUtils.frameExecutor.execute { later.countDown() }
+            assertTrue(later.await(5, TimeUnit.SECONDS), "the frame thread was torn down with the root")
 
             assertFailsWith<IllegalStateException> { WebBackend.frame(800, 600) }
             assertEquals(0, Recorder.size, "a frame fed after the disconnect still recorded content")
