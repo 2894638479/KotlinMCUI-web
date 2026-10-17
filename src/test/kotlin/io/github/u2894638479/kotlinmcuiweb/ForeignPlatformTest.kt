@@ -27,15 +27,18 @@ import kotlin.test.assertTrue
  *
  * **Why this needs its own JVM, and why that is load-bearing rather than incidental.** `DslRuntime`
  * is a process singleton: `install` runs once, `platformReady` publishes once, and the first
- * publication wins for the life of the process. A JVM that has already published the web platform can
- * therefore never lose the race - it would see `true` where this case needs `false`, and the case
- * would pass while proving nothing. So the requirement is a **fresh process**, and `forkEvery = 1`
- * in the build is what provides it. The class must also not go through `WebTestRuntime`, because that
- * helper's whole job is to publish the web platform; it builds its own runtime from the starting
+ * publication wins for the life of the process. A JVM that has already published the web platform
+ * cannot lose the race, so the publication under test has to happen in a fresh process - the build's
+ * `forkEvery = 1` is what provides one. The class also must not go through `WebTestRuntime`, because
+ * that helper's whole job is to publish the web platform; it builds its own runtime from the starting
  * state instead.
  *
- * If the build ever stops forking per class, this case becomes quietly meaningless rather than
- * failing - which is why the dependency is written down here.
+ * **If that build setting ever goes away, this case goes red - not green.** The first assertion is the
+ * precondition self-check: `assertTrue(platformReady { ForeignPlatform })` fails the moment another
+ * platform already owns the process, and a repeated `install` throws even earlier. What costs time is
+ * not a silent pass but a **misleading failure** - the message would point at "the foreign platform
+ * did not win" rather than at the configuration. That is why the prerequisite is written here:
+ * otherwise every reader has to trace an assertion back to the build file.
  */
 class ForeignPlatformTest {
 
