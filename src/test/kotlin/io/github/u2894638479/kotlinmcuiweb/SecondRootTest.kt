@@ -12,6 +12,8 @@ import io.github.u2894638479.kotlinmcui.math.Position
 import io.github.u2894638479.kotlinmcui.math.px
 import io.github.u2894638479.kotlinmcui.math.rect.MutRect
 import io.github.u2894638479.kotlinmcui.modifier.Modifier
+import io.github.u2894638479.kotlinmcui.backend.DslRuntime
+import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
 import io.github.u2894638479.kotlinmcui.test.TestColorPage
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -28,13 +30,11 @@ import kotlin.test.assertTrue
  * Everything here uses the public surface only. A root built with an `internal` symbol would pass
  * without answering the question, because an outside module cannot reach one.
  *
- * **What this file can and cannot claim, after the singleton was deleted.** An outside root can hold
- * its own rect and scale, render a tree of its own components, take focus through its own tree with
- * its own writer, and a component whose tree no root owns now fails loud instead of answering for
- * another tree. It **cannot** host framework content: the framework pages sampled ask `isFocused`
- * while they build, that question needs a root state, and an outside root has none - so the page
- * cannot be built at all. The case pinning that half says so plainly; it is not written to look like
- * something that works.
+ * **What this file can claim.** An outside module can build a root of its own, render its own tree in
+ * it, take focus through its own tree with its own writer, and host framework content - the last one
+ * by mounting the screen onto a root the runtime created, because **that mount is what stamps the
+ * screen's store with a root state**. A component whose tree no root owns still fails loud, which is
+ * the ruling: an answer that silently describes somebody else's tree is worse than a loud failure.
  */
 class SecondRootTest {
 
@@ -203,38 +203,37 @@ class SecondRootTest {
     }
 
     /**
-     * A framework page cannot be built on a root the runtime does not own - **deliberately red**.
+     * A framework page can be built and rendered on a root of its own.
      *
-     * - **Red is deliberate**: this asserts the behaviour we want, so it fails today on purpose. It is
-     *   not quarantined, because a skipped criterion reports green without ever being triggered.
-     * - **Where it goes red**: not in rendering - in **building**. The colour page's editor asks
-     *   `isFocused` from inside its own `build` (`Colors.kt:507` via `ColorEdit`), that question
-     *   resolves through `dataStore?.rootState`, and a foreign root has no root state, so the tree is
-     *   never built. The failure message carries the thrown text, which says the component is "not
-     *   mounted on any root".
-     * - **What it waits for**: step 5's `createRoot`, which has to stamp a root state **before** the
-     *   build, not merely answer queries afterwards.
-     * - **Wider than this page**: the layout page trips the same constraint, so today an outside root
-     *   can host **its own components and no framework content at all**.
+     * **This case was red for a while, and the reason is worth keeping.** It used to mount the screen
+     * onto a hand-made `DslScope` whose child list is a plain group; nothing stamped the screen's
+     * `dataStore.rootState`, so the page's first focus read threw while building. The capability was
+     * not missing - **the case was not taking the mounting path**. `DslRoot.children` stamps the
+     * store on *every* `collect`, so all it needed was a root obtained from `DslRuntime.createRoot`,
+     * and it now walks that path. Recorded here because "it was red" and "it cannot be done" look
+     * identical from a failing test, and only one of them was true.
+     *
+     * The root is `TRANSIENT` rather than the process owner: the point is that an outside module can
+     * host framework content on a root of its own, not that the owner root works.
      */
     @Test
-    fun `a framework page cannot be built on a foreign root`() {
+    fun `a framework page can be built and rendered on a root of its own`() {
         WebTestRuntime.install()
 
-        val root = SecondRoot(1.0, "root-with-colour-page")
-        val store = DslDataStore(WebPlatform, WebRootProvider, "colour-page-on-foreign-root", {}, { TestColorPage() })
+        val root = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val store = DslDataStore(WebPlatform, WebRootProvider, "colour-page-on-its-own-root", {}, { TestColorPage() })
         root.children.collect(store.dslScreen)
 
         val thrown = runCatching {
             Recorder.beginFrame()
-            context(Recorder, Unit, Position(0.px, 0.px)) { root.render() }
+            context(Recorder, Unit, Position(0.px, 0.px)) { root.component.render() }
         }.exceptionOrNull()
 
         assertNull(
             thrown,
-            "a framework page has to be buildable on an outside root; it threw " +
-                "${thrown?.javaClass?.simpleName}: ${thrown?.message} - the build-phase focus read " +
-                "needs a root state stamped before the build, which is step 5",
+            "a framework page has to build on a root of its own; it threw " +
+                "${thrown?.javaClass?.simpleName}: ${thrown?.message}",
         )
+        assertTrue(Recorder.size > 0, "the framework page drew nothing on its own root")
     }
 }
