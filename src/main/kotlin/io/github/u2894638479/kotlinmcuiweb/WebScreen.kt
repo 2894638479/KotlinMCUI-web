@@ -1,8 +1,8 @@
 package io.github.u2894638479.kotlinmcuiweb
 
+import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.container.DslChild
 import io.github.u2894638479.kotlinmcui.container.DslDataStore
-import io.github.u2894638479.kotlinmcui.container.TopComponent
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
 
 /**
@@ -32,20 +32,20 @@ class WebScreen internal constructor(
     /**
      * Make this page the tree the next frame renders.
      *
-     * The shared child list is appended to rather than rebuilt, because the framework's overlay
+     * The root's child list is appended to rather than rebuilt, because the framework's overlay
      * layer is collected into it once and dropping the list would take the overlays with it.
      */
     internal fun mount() {
         check(!released) { "page '$title' was released and cannot be shown again" }
         if (child != null) return
-        child = TopComponent.children.collect(dslScreen)
+        child = DslRuntime.ownerRoot.children.collect(dslScreen)
     }
 
     /** Take the page out of the rendered tree, leaving what it declared in place. */
     internal fun unmount() {
         val mounted = child ?: return
         child = null
-        TopComponent.children.remove(mounted)
+        DslRuntime.ownerRoot.children.remove(mounted)
     }
 
     /** End the page and close its framework screen, which releases everything it scoped. */

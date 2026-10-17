@@ -23,8 +23,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * tick that arrives while a frame is already being taken is dropped rather than queued - the rule the
  * delta design was built around, and the reason a slow client cannot make the server fall behind.
  *
- * The viewport, on the other hand, is shared: `TopComponent.rect` is process-wide, so a resize from
- * one client resizes the UI for all of them and forces every session back to a keyframe.
+ * The viewport, on the other hand, is shared: `DslRuntime.ownerRoot.rect` is one rect for the process,
+ * so a resize from one client resizes the UI for all of them and forces every session back to a
+ * keyframe.
  *
  * ### Threads
  * Everything that touches the framework happens on [WebUtils.frameExecutor] - the context records the

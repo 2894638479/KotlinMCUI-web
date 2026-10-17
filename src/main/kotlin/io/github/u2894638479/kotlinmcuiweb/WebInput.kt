@@ -1,7 +1,7 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslBackendInput
-import io.github.u2894638479.kotlinmcui.container.TopComponent
+import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.input.Key
 import io.github.u2894638479.kotlinmcui.input.KeyModifiers
 import io.github.u2894638479.kotlinmcui.input.MouseButton
@@ -67,35 +67,35 @@ internal object WebInput : DslBackendInput {
 
     fun moved(x: Float, y: Float) {
         mouse = Position(x.px, y.px)
-        guarded("a cursor move", Unit) { context(mouse) { TopComponent.mouseMove() } }
+        guarded("a cursor move", Unit) { context(mouse) { DslRuntime.ownerRoot.component.mouseMove() } }
     }
 
     fun pressed(button: MouseButton): Boolean {
         heldButtons.add(button.ordinal)
-        return guarded("a mouse press", false) { context(mouse, modifiers) { TopComponent.mouseDown(button) } }
+        return guarded("a mouse press", false) { context(mouse, modifiers) { DslRuntime.ownerRoot.component.mouseDown(button) } }
     }
 
     fun released(button: MouseButton): Boolean {
         heldButtons.remove(button.ordinal)
-        return guarded("a mouse release", false) { context(mouse, modifiers) { TopComponent.mouseUp(button) } }
+        return guarded("a mouse release", false) { context(mouse, modifiers) { DslRuntime.ownerRoot.component.mouseUp(button) } }
     }
 
     fun scrolled(amount: Double, horizontal: Boolean) {
         guarded("a scroll", Unit) {
             context(mouse) {
-                if (horizontal) TopComponent.mouseScrollHorizontal(amount) else TopComponent.mouseScrollVertical(amount)
+                if (horizontal) DslRuntime.ownerRoot.component.mouseScrollHorizontal(amount) else DslRuntime.ownerRoot.component.mouseScrollVertical(amount)
             }
         }
     }
 
     fun keyPressed(key: Key, scanCode: Int): Boolean {
         heldKeys.add(key.code)
-        return guarded("a key press", false) { context(modifiers) { TopComponent.keyDown(key, scanCode) } }
+        return guarded("a key press", false) { context(modifiers) { DslRuntime.ownerRoot.component.keyDown(key, scanCode) } }
     }
 
     fun keyReleased(key: Key, scanCode: Int): Boolean {
         heldKeys.remove(key.code)
-        return guarded("a key release", false) { context(modifiers) { TopComponent.keyUp(key, scanCode) } }
+        return guarded("a key release", false) { context(modifiers) { DslRuntime.ownerRoot.component.keyUp(key, scanCode) } }
     }
 
     /**
@@ -112,12 +112,12 @@ internal object WebInput : DslBackendInput {
             else -> charArrayOf(Character.highSurrogate(codePoint), Character.lowSurrogate(codePoint))
         }
         var consumed = false
-        for (unit in units) consumed = guarded("a typed character", false) { TopComponent.charTyped(unit) } || consumed
+        for (unit in units) consumed = guarded("a typed character", false) { DslRuntime.ownerRoot.component.charTyped(unit) } || consumed
         return consumed
     }
 
     fun dropped(files: Array<Path>) {
-        guarded("a file drop", Unit) { context(mouse) { TopComponent.dropFiles(files) } }
+        guarded("a file drop", Unit) { context(mouse) { DslRuntime.ownerRoot.component.dropFiles(files) } }
     }
 
     /** Focus loss or disconnect: nothing may stay held down. */

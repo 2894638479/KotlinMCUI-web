@@ -6,7 +6,7 @@ import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
 import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
 import io.github.u2894638479.kotlinmcui.backend.DslBackendScreenHolder
 import io.github.u2894638479.kotlinmcui.backend.DslBackendUtils
-import io.github.u2894638479.kotlinmcui.container.TopComponent
+import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
 import io.github.u2894638479.kotlinmcui.math.px
 
@@ -66,18 +66,23 @@ object WebBackend : DslBackend<Unit, WebScreen>,
      * one thread for the lifetime of the pages: the framework's context records the thread that
      * created it and refuses to be used from another, which is why [WebUtils.mainDispatcher] is a
      * single thread as well.
+     *
+     * The root comes from [DslRuntime.ownerRoot] rather than a singleton, and the order is part of the
+     * contract: the rect is written first, then the frame is rendered, so the tree lays itself out for
+     * the size it is about to be drawn at.
      */
     internal fun frame(width: Int, height: Int) {
         Recorder.beginFrame()
         Recorder.surfaceWidth = width
         Recorder.surfaceHeight = height
-        TopComponent.rect.apply {
+        val root = DslRuntime.ownerRoot
+        root.rect.apply {
             left = 0.px
             top = 0.px
             right = width.px
             bottom = height.px
         }
-        context(this, Unit, WebInput.mouse) { TopComponent.render() }
+        context(this, Unit, WebInput.mouse) { root.component.render() }
         context(Unit) { flush() }
     }
 
