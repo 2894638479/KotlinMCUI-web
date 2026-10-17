@@ -9,23 +9,22 @@ import io.github.u2894638479.kotlinmcui.dsl.DslFunction
  * One page of the web UI: the framework screen and the state that belongs to it.
  *
  * The framework wants two things from a screen - a [DslDataStore] and a [io.github.u2894638479.kotlinmcui.container.DslScreen]
- * - and this is where both come from, exactly as in the other backends. Nothing here knows about a
- * socket, a canvas or a browser: it is the same object either way, and the transport drives
- * [WebBackend.frame] on whatever surface size the client reports.
+ * - and this is where both come from, exactly as in the other backends. The store takes the platform
+ * and the root provider separately now, because the contract separates what the process knows from
+ * what one output answers for itself.
  *
  * A page is closed by leaving it: the close action pops the stack, so `closeScreen()` and the
  * framework's own "go back" both end up in the same place. [release] is the other thing - it ends the
  * page for good - and only the backend calls it.
  */
 class WebScreen internal constructor(
-    backend: WebBackend,
     val title: String,
     dslFunction: DslFunction,
 ) {
     private var child: DslChild? = null
     private var released = false
 
-    val dataStore = DslDataStore(backend, title, { WebBackend.pop() }, dslFunction)
+    val dataStore = DslDataStore(WebPlatform, WebRootProvider, title, { WebBackend.pop() }, dslFunction)
 
     val dslScreen = dataStore.dslScreen
 

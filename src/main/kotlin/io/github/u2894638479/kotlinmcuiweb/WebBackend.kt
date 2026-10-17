@@ -1,38 +1,23 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackend
-import io.github.u2894638479.kotlinmcui.backend.DslBackendInput
-import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
-import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
 import io.github.u2894638479.kotlinmcui.backend.DslBackendScreenHolder
-import io.github.u2894638479.kotlinmcui.backend.DslBackendUtils
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
-import io.github.u2894638479.kotlinmcui.math.px
 
 /**
- * The web backend: the framework's rendering contract, recorded instead of drawn.
+ * The web backend's page stack: what a client is shown, and in which order.
  *
- * It is assembled from the same four pieces every backend is - a renderer, metadata, utilities and
- * input - and adds two things: a frame that can be *taken* from outside, because a client asks for
- * one, and a page stack, because the framework's own screen model is one (`showScreen` enters a page,
- * closing it goes back).
+ * The aggregate backend the framework used to publish is gone, so this object no longer implements
+ * anything - it holds the one thing that is neither the platform's nor the root provider's: the stack
+ * of pages, because the framework's own screen model is a stack (`showScreen` enters a page, closing
+ * it goes back).
  *
- * [Recorder] is the renderer, so this object never touches a canvas; what a client receives is the
- * word buffer [frame] leaves behind.
- *
- * The type parameters are this backend's own. The render parameter is [Unit] on purpose: a recording
- * backend has no platform object to pass around, which is also the honest answer to "what would a
- * second implementation of this renderer need" - nothing.
- *
- * One instance per process, because the framework publishes one backend per process.
+ * The pieces it used to be assembled from now live where the contract puts them: metadata and the
+ * process helpers on [WebPlatform], recording/input/screens on [WebRootProvider], and the helpers one
+ * output answers for itself on [WebUtils].
  */
-object WebBackend : DslBackend<Unit, WebScreen>,
-    DslBackendRenderer<Unit> by Recorder,
-    DslBackendMetadata by WebMetadata,
-    DslBackendUtils by WebUtils,
-    DslBackendInput by WebInput
-{
+object WebBackend {
+
     /**
      * The pages, oldest first; the last one is what a frame renders.
      *
@@ -48,9 +33,9 @@ object WebBackend : DslBackend<Unit, WebScreen>,
 
     internal val currentPage: WebScreen? get() = pages.lastOrNull()
 
-    override fun create(title: String, dslFunction: DslFunction): DslBackendScreenHolder<WebScreen> =
+    internal fun create(title: String, dslFunction: DslFunction): DslBackendScreenHolder<WebScreen> =
         object : DslBackendScreenHolder<WebScreen> {
-            override val screen = WebScreen(this@WebBackend, title, dslFunction)
+            override val screen = WebScreen(title, dslFunction)
 
             /** Showing a page enters it: it becomes the top of the stack. */
             override fun show() = push(screen)
@@ -59,31 +44,16 @@ object WebBackend : DslBackend<Unit, WebScreen>,
         }
 
     /**
-     * One frame, recorded.
+     * One frame, recorded, for the process owner root.
      *
-     * Called by whoever owns the frame clock - a socket reader serving a `tick`, or the measurement
-     * tool - so it is synchronous and returns once the whole tree has been walked. It must run on
-     * one thread for the lifetime of the pages: the framework's context records the thread that
-     * created it and refuses to be used from another, which is why [WebUtils.mainDispatcher] is a
-     * single thread as well.
-     *
-     * The root comes from [DslRuntime.ownerRoot] rather than a singleton, and the order is part of the
-     * contract: the rect is written first, then the frame is rendered, so the tree lays itself out for
-     * the size it is about to be drawn at.
+     * The transport owns the frame clock, so it is what says how big the output is; the frame itself
+     * belongs to [WebRootProvider]. Keeping the two together here means a caller does not have to know
+     * which object owns which half - and it is the only place in the backend that names the root.
      */
     internal fun frame(width: Int, height: Int) {
-        Recorder.beginFrame()
         Recorder.surfaceWidth = width
         Recorder.surfaceHeight = height
-        val root = DslRuntime.ownerRoot
-        root.rect.apply {
-            left = 0.px
-            top = 0.px
-            right = width.px
-            bottom = height.px
-        }
-        context(this, Unit, WebInput.mouse) { root.component.render() }
-        context(Unit) { flush() }
+        WebRootProvider.frame(DslRuntime.ownerRoot, Unit)
     }
 
     /**

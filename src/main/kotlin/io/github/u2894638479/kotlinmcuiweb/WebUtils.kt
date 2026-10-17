@@ -1,6 +1,7 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendUtils
+import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
+import io.github.u2894638479.kotlinmcui.backend.DslRootUtils
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import io.github.u2894638479.kotlinmcui.math.px
@@ -27,12 +28,17 @@ import javax.imageio.ImageIO
  * remembers it, and the transport serves the bytes when a client asks for that id. Nothing else may
  * be served for a `local:` id, so a client cannot name a path of its own.
  *
- * [mainDispatcher] is a single thread on purpose. The framework's context is thread-confined - it
+ * [sessionDispatcher] is a single thread on purpose. The framework's context is thread-confined - it
  * records the thread that created it and refuses to be touched from another - so a backend hosted by
  * a server has to name *one* thread as the frame thread, and this is it. A transport that wants to
  * render from a socket reader must hop onto this dispatcher first.
+ *
+ * The two interface halves are implemented here because both answer from server state rather than from
+ * a platform: the process-level questions ([translate], [isInWorld], the local images, [quit]) and the
+ * per-output ones ([clipboard], [capture], [narrate], [playButtonSound], [openUri]). Splitting them
+ * across two objects would only move the same fields around.
  */
-internal object WebUtils : DslBackendUtils {
+internal object WebUtils : DslPlatformUtils, DslRootUtils {
     private val frameThread = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "kotlinmcui-web").apply { isDaemon = true }
     }
@@ -180,7 +186,7 @@ internal object WebUtils : DslBackendUtils {
         dslLogger.info("web utils: asked to open '$uri', which only the client can do")
     }
 
-    override val mainDispatcher: CoroutineDispatcher = frameThread.asCoroutineDispatcher()
+    override val sessionDispatcher: CoroutineDispatcher = frameThread.asCoroutineDispatcher()
 
     /**
      * Photograph the client's canvas.

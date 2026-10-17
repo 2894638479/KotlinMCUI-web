@@ -21,7 +21,8 @@ internal object WebTestRuntime {
     fun install() {
         if (installed) return
         DslRuntime.install { WebMetadata }
-        DslRuntime.platformReady { WebBackend }
+        DslRuntime.registerProvider(WebRootProvider)
+        DslRuntime.platformReady { WebPlatform }
         for (overlay in DslEntryLoader.enabledOverlays) DslEntryLoader.setOverlayEnabled(overlay, false)
         installed = true
     }

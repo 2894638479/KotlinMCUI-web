@@ -21,7 +21,8 @@ fun main(args: Array<String>) {
     val waitSeconds = (option(args, "--wait") ?: (WebServer.DEFAULT_WAIT_FOR_CLIENT_MILLIS / 1000).toString()).toLong()
 
     DslRuntime.install { WebMetadata }
-    DslRuntime.platformReady { WebBackend }
+    DslRuntime.registerProvider(WebRootProvider)
+    DslRuntime.platformReady { WebPlatform }
 
     val server = WebServer(
         port = (option(args, "--port") ?: "8080").toInt(),

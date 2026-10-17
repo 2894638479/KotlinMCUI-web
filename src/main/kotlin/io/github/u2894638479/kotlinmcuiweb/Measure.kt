@@ -28,7 +28,8 @@ fun main(args: Array<String>) {
     val height = (option(args, "--height") ?: "720").toInt()
 
     DslRuntime.install { WebMetadata }
-    DslRuntime.platformReady { WebBackend }
+    DslRuntime.registerProvider(WebRootProvider)
+    DslRuntime.platformReady { WebPlatform }
     // Whatever demo overlays this machine has enabled are switched off for the run: an overlay draws
     // per-frame timings, and a page that reports its own frame time is a page that never repeats
     // itself. The numbers below are meant to be the page's, not the overlay's.

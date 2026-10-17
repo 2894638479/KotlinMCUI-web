@@ -222,7 +222,7 @@ class SecondRootTest {
         WebTestRuntime.install()
 
         val root = SecondRoot(1.0, "root-with-colour-page")
-        val store = DslDataStore(WebBackend, "colour-page-on-foreign-root", {}, { TestColorPage() })
+        val store = DslDataStore(WebPlatform, WebRootProvider, "colour-page-on-foreign-root", {}, { TestColorPage() })
         root.children.collect(store.dslScreen)
 
         val thrown = runCatching {
