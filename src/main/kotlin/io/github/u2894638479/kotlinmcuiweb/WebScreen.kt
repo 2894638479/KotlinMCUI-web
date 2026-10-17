@@ -24,7 +24,7 @@ class WebScreen internal constructor(
     private var child: DslChild? = null
     private var released = false
 
-    val dataStore = DslDataStore(WebPlatform, WebRootProvider, title, { WebBackend.pop() }, dslFunction)
+    val dataStore = DslDataStore(WebPlatform, WebBackend.root, title, { WebBackend.pop() }, dslFunction)
 
     val dslScreen = dataStore.dslScreen
 

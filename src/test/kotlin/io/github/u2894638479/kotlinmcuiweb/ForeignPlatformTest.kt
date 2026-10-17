@@ -1,50 +1,34 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendInput
 import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
-import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
 import io.github.u2894638479.kotlinmcui.backend.DslPlatform
-import io.github.u2894638479.kotlinmcui.backend.DslRootProvider
-import io.github.u2894638479.kotlinmcui.backend.DslRootScreenFactory
-import io.github.u2894638479.kotlinmcui.backend.DslRootUtils
 import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.backend.dslPlatform
-import io.github.u2894638479.kotlinmcui.container.DslRoot
 import io.github.u2894638479.kotlinmcui.container.DslDataStore
-import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
 import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
  * Two backends in one process: whoever publishes the platform first owns it, and everyone else still
- * serves their own roots.
+ * serves their own root.
  *
- * The framework publishes exactly one platform per process, so a second backend's `platformReady`
- * returns `false` and is refused. That refusal says **one thing only**: this backend did not become
- * the process's platform. It must not stop the backend from registering its provider, creating its
- * own roots, or drawing pages - which is the whole point of "translate comes from the platform,
- * rendering comes from the root".
+ * The runtime now hands out no roots at all - a backend builds its own from its input, renderer,
+ * screen factory and utils. That is what makes coexistence structural rather than negotiated: a
+ * refused publication says only that the process platform is somebody else's, and this backend's root
+ * is unaffected.
  *
- * **Why this needs its own JVM, and why that is load-bearing rather than incidental.** `DslRuntime`
- * is a process singleton: `install` runs once, `platformReady` publishes once, and the first
- * publication wins for the life of the process. A JVM that has already published the web platform
- * cannot lose the race, so the publication under test has to happen in a fresh process - the build's
- * `forkEvery = 1` is what provides one. The class also must not go through `WebTestRuntime`, because
- * that helper's whole job is to publish the web platform; it builds its own runtime from the starting
- * state instead.
- *
- * **If that build setting ever goes away, this case goes red - not green.** The first assertion is the
- * precondition self-check: `assertTrue(platformReady { ForeignPlatform })` fails the moment another
- * platform already owns the process, and a repeated `install` throws even earlier. What costs time is
- * not a silent pass but a **misleading failure** - the message would point at "the foreign platform
- * did not win" rather than at the configuration. That is why the prerequisite is written here:
- * otherwise every reader has to trace an assertion back to the build file.
+ * **Why this needs its own JVM.** `DslRuntime` is a process singleton: `install` runs once and `start`
+ * publishes once, and the first publisher wins for the life of the process. A JVM that has already
+ * published the web platform cannot lose the race, so the publication under test has to happen in a
+ * fresh process - the build's `forkEvery = 1` is what provides one. **If that setting ever goes away
+ * the case goes red, not green**: the first assertion is the precondition self-check, and a repeated
+ * `install` throws even earlier. What that costs is a misleading message pointing at the platform race
+ * rather than at the configuration, which is why the prerequisite is written here.
  */
 class ForeignPlatformTest {
 
@@ -63,73 +47,33 @@ class ForeignPlatformTest {
         override val dispatcher = WebUtils.sessionDispatcher
     }
 
-    /** A provider another backend registered first; the process main root would be built from it. */
-    private object ForeignProvider : DslRootProvider<Nothing, Nothing> {
-        override val renderer: DslBackendRenderer<Nothing>? get() = null
-        override val input: DslBackendInput get() = error("not this backend")
-        override val screenFactory: DslRootScreenFactory<Nothing>? get() = null
-        override val rootUtils: DslRootUtils get() = error("not this backend")
-        override fun frame(root: DslRoot, renderParam: Nothing) = error("not this backend")
-    }
-
     /**
-     * A backend that lost the platform race still serves its own roots and pages.
+     * A backend that lost the platform race still serves its own root and its own pages.
      *
-     * The assertions are the three things a loser could plausibly get wrong: it stops registering its
-     * provider, it cannot create a root, or its pages end up using the winner's platform. The third is
-     * the subtle one - the screen's store is built with **our** platform object, so translation and
-     * world questions keep coming from us even though `dslPlatform` is somebody else's.
+     * The evidence is the production path end to end: the mount, then a frame through
+     * [WebBackend.frame], then a non-empty recording. A root of its own is the only way that can work
+     * now that the runtime no longer builds roots for anybody.
      */
     @Test
-    fun `a backend that did not win the platform still serves its own roots`() {
+    fun `a backend that did not win the platform still serves its own root`() {
         DslRuntime.install { WebMetadata }
         assertTrue(
-            DslRuntime.platformReady { ForeignPlatform },
+            DslRuntime.start { ForeignPlatform },
             "the foreign platform should have won the publication",
         )
 
-        // Another backend registered first, so the process main root - if anything materialises it - is
-        // built from that provider and not from ours.
-        DslRuntime.registerProvider(ForeignProvider)
-        DslRuntime.registerProvider(WebRootProvider)
-        assertFalse(
-            DslRuntime.platformReady { WebPlatform },
-            "a second platform must be refused - one publisher per process",
-        )
-        assertTrue(
-            DslRuntime.registeredProviders.contains(WebRootProvider),
-            "losing the platform must not stop this backend registering its provider",
-        )
+        // Loses the publication on purpose; must carry on anyway.
+        WebBackend.adoptRoot()
         assertEquals(ForeignPlatform, dslPlatform, "the process platform should be the first publisher")
 
-        // Only after the platform is published: before that, `rootFor` returns a refused root.
-        WebBackend.adoptRoot()
-
-        // The production mount path: this is where the backend decides which root its pages live on.
-        // It threw before the fix - mounting onto the foreign main root, whose provider cannot create
-        // screens - so reaching the frame below is already part of the evidence.
         WebBackend.create("mine") { TestLayoutPage() }.show()
-
-        // The production frame path, and a frame-content assertion: rect alone would only prove the
-        // path was called, not whose tree it recorded.
         Recorder.surfaceWidth = 800
         Recorder.surfaceHeight = 600
         WebBackend.frame(800, 600)
+
         assertTrue(Recorder.size > 0, "the production frame path drew nothing from this backend's own page")
 
-        val root = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
-        with(DslRuntime) {
-            assertTrue(root.isRegistered, "losing the platform must not stop this backend creating a root")
-        }
-
-        val store = DslDataStore(WebPlatform, WebRootProvider, "coexist", {}, { TestLayoutPage() })
-        root.children.collect(store.dslScreen)
-
-        Recorder.surfaceWidth = 800
-        Recorder.surfaceHeight = 600
-        WebRootProvider.frame(root, Unit)
-
-        assertTrue(Recorder.size > 0, "the page drew nothing on a root this backend owns")
+        val store = DslDataStore(WebPlatform, WebBackend.root, "coexist", {}, { TestLayoutPage() })
         assertTrue(
             store.platform === WebPlatform,
             "the page must be built on this backend's platform, not the winner's",

@@ -1,10 +1,12 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslBackendScreenHolder
+import io.github.u2894638479.kotlinmcui.backend.DslPreview
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.container.DslRoot
-import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
+import io.github.u2894638479.kotlinmcui.logger.dslLogger
+import io.github.u2894638479.kotlinmcui.math.px
 
 /**
  * The web backend's page stack: what a client is shown, and in which order.
@@ -68,15 +70,25 @@ object WebBackend {
      * the difference is who else can see it.
      */
     /**
-     * Take the root this backend renders into.
+     * Build the root this backend renders into.
      *
-     * **Only legal after the platform is published and this provider is registered.** Before the
-     * platform exists, `rootFor` hands back a *refused* root, which fails where it is used rather than
-     * where it was asked for - that is what made three test classes red and one hang while waiting for
-     * a frame that could never arrive.
+     * The runtime no longer owns roots, so this backend constructs its own: the recorder draws, the
+     * web input carries pointer and keyboard state, [WebScreenFactory] makes the pages, and [WebUtils]
+     * answers the per-output questions.
+     *
+     * A refused platform publication only says the process platform belongs to another backend - this
+     * one still builds its root and serves it, so there is no early return here, and that is a
+     * decision rather than an omission.
+     *
+     * `DslPreview.start` has to be called explicitly now. It used to ride along with the publication,
+     * so leaving it out does not fail loudly - the preview simply never appears.
      */
     internal fun adoptRoot() {
-        root = DslRuntime.rootFor(WebRootProvider, ViewerLifetime.PROCESS)
+        if (!DslRuntime.start { WebPlatform }) {
+            dslLogger.warn("web: another backend published this process's platform; this one serves its own root")
+        }
+        root = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        DslPreview.start(root)
     }
 
     /**
@@ -90,9 +102,17 @@ object WebBackend {
      * goes to; a multi-root backend routes there instead.
      */
     internal fun frame(width: Int, height: Int) {
+        Recorder.beginFrame()
         Recorder.surfaceWidth = width
         Recorder.surfaceHeight = height
-        WebRootProvider.frame(root, Unit)
+        root.rect.apply {
+            left = 0.px
+            top = 0.px
+            right = width.px
+            bottom = height.px
+        }
+        context(Recorder, Unit, WebInput.mouse) { root.component.render() }
+        context(Unit) { Recorder.flush() }
     }
 
     /**

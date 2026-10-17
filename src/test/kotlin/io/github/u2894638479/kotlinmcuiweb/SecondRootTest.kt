@@ -14,7 +14,7 @@ import io.github.u2894638479.kotlinmcui.math.px
 import io.github.u2894638479.kotlinmcui.math.rect.MutRect
 import io.github.u2894638479.kotlinmcui.modifier.Modifier
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
-import io.github.u2894638479.kotlinmcui.container.ViewerLifetime
+import io.github.u2894638479.kotlinmcui.container.DslRoot
 import io.github.u2894638479.kotlinmcui.test.TestColorPage
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -252,8 +252,8 @@ class SecondRootTest {
     fun `a framework page can be built and rendered on a root of its own`() {
         WebTestRuntime.install()
 
-        val root = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
-        val store = DslDataStore(WebPlatform, WebRootProvider, "colour-page-on-its-own-root", {}, { TestColorPage() })
+        val root = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val store = DslDataStore(WebPlatform, root, "colour-page-on-its-own-root", {}, { TestColorPage() })
         root.children.collect(store.dslScreen)
 
         val thrown = runCatching {
@@ -287,8 +287,8 @@ class SecondRootTest {
     fun `hover follows each root's own tree`() {
         WebTestRuntime.install()
 
-        val rootA = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
-        val rootB = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val rootA = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val rootB = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
         val probeA = probe("hover-a")
         val probeB = probe("hover-b").apply {
             rect.left = 200.px
@@ -308,8 +308,26 @@ class SecondRootTest {
         Recorder.surfaceHeight = 600
         WebInput.mouse = Position(10.px, 10.px)
 
-        WebRootProvider.frame(rootA, Unit)
-        WebRootProvider.frame(rootB, Unit)
+        // The backend's own frame, inlined: write the rect first, then render, then flush.
+        Recorder.beginFrame()
+        rootA.rect.apply {
+            left = 0.px
+            top = 0.px
+            right = Recorder.surfaceWidth.px
+            bottom = Recorder.surfaceHeight.px
+        }
+        context(Recorder, Unit, WebInput.mouse) { rootA.component.render() }
+        context(Unit) { Recorder.flush() }
+
+        Recorder.beginFrame()
+        rootB.rect.apply {
+            left = 0.px
+            top = 0.px
+            right = Recorder.surfaceWidth.px
+            bottom = Recorder.surfaceHeight.px
+        }
+        context(Recorder, Unit, WebInput.mouse) { rootB.component.render() }
+        context(Unit) { Recorder.flush() }
 
         assertTrue(
             probeA.hoverNotes.contains(probeA.identity),
@@ -336,8 +354,8 @@ class SecondRootTest {
     fun `preedit goes to the tree it was raised on`() {
         WebTestRuntime.install()
 
-        val rootA = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
-        val rootB = DslRuntime.createRoot(WebRootProvider, ViewerLifetime.TRANSIENT)
+        val rootA = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val rootB = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
         val probeA = probe("preedit-a")
         val probeB = probe("preedit-b")
         rootA.children.collect(probeA)
