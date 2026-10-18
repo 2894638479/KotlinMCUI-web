@@ -12,9 +12,10 @@ import java.nio.file.Paths
  * version is whatever the host put in [GAME_VERSION_PROPERTY] (empty on a plain JVM), and the loader
  * is not guessed - a host that runs under one reports it itself (see [gameLoader]).
  *
- * [environment] is [Environment.NONE]: nothing here needs a game side. The surface is a browser, and
- * a browser may be looking at a dedicated server's UI just as well as a client's - so the runtime
- * must not initialise either game entry point on this backend's behalf.
+ * [environment] is [Environment.STANDALONE]: no game side exists in this process. The surface is a
+ * browser, and a browser may be looking at a dedicated server's UI just as well as a client's - so
+ * neither side may be claimed on this backend's behalf. Standalone does not mean "load no entries":
+ * the registry still loads every entry that declared standalone.
  */
 internal object WebMetadata : DslPlatformMetadata {
     const val GAME_VERSION_PROPERTY = "kotlinmcuiweb.gameVersion"
@@ -48,5 +49,5 @@ internal object WebMetadata : DslPlatformMetadata {
      */
     override val gameLoader: String get() = ""
 
-    override val environment: Environment get() = Environment.NONE
+    override val environment: Environment get() = Environment.STANDALONE
 }

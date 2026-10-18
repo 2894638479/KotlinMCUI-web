@@ -49,12 +49,17 @@ val coroutines = "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutines_vers
  * release - silently compiled this backend against a different core than the one being developed
  * beside it. Failing here instead costs one command; the silent version once cost a whole green build
  * that measured the wrong library.
+ *
+ * The two products are resolved together but used apart. The sources jar is for navigation only: it
+ * carries `META-INF/kotlinmcui/entries` too, and the entry registry scans the classpath for that file,
+ * so putting it on a runtime classpath makes every declaration appear twice. `../kotlinmcui-backend`
+ * makes the same split for the same reason.
  */
-val coreLibrary: Any = run {
+val coreArtifacts: Pair<Any, Any?> = run {
     val sibling = rootProject.file("../kotlinmcui")
     if (!sibling.isDirectory) {
         // A clean checkout or CI: there is no sibling to build against, so the published core is right.
-        "com.github.2894638479:KotlinMCUI:v$kotlinmcui_version"
+        "com.github.2894638479:KotlinMCUI:v$kotlinmcui_version" to null
     } else {
         val jarFile = sibling.resolve("build/libs/kotlinmcui-$kotlinmcui_version.jar")
         val sourceFile = sibling.resolve("build/libs/kotlinmcui-$kotlinmcui_version-sources.jar")
@@ -66,9 +71,15 @@ val coreLibrary: Any = run {
             "the local core sources jar is missing: run ./gradlew sourcesJar in ../kotlinmcui " +
                 "(or delete the sibling checkout to build against the published core)"
         }
-        files(jarFile, sourceFile)
+        files(jarFile) to files(sourceFile)
     }
 }
+
+/** The binary half: the only one allowed on a runtime classpath. */
+val coreLibrary: Any = coreArtifacts.first
+
+/** The navigation half: compile classpath only. */
+val coreSources: Any? = coreArtifacts.second
 
 /** What `main()` needs at runtime. Kept out of `runtimeClasspath` so the built jar stays a library. */
 val standalone = configurations.create("standalone") {
@@ -78,6 +89,7 @@ val standalone = configurations.create("standalone") {
 
 dependencies {
     compileOnly(coreLibrary)
+    coreSources?.let { compileOnly(it) }
     compileOnly(slf4j)
     compileOnly(fastutil)
     compileOnly(coroutines)
