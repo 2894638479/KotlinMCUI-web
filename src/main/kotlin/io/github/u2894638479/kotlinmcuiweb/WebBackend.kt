@@ -17,8 +17,8 @@ import io.github.u2894638479.kotlinmcui.math.px
  * it goes back).
  *
  * The pieces it used to be assembled from now live where the contract puts them: metadata and the
- * process helpers on [WebPlatform], recording/input/screens on [WebRootProvider], and the helpers one
- * output answers for itself on [WebUtils].
+ * process helpers on [WebPlatform], recording/input/screens on [Recorder], [WebInput] and
+ * [WebScreenFactory], and the helpers one output answers for itself on [WebUtils].
  */
 object WebBackend {
 
@@ -120,8 +120,8 @@ object WebBackend {
      * One frame, recorded, for [root].
      *
      * The transport owns the frame clock, so it is what says how big the output is; the frame itself
-     * belongs to [WebRootProvider]. Keeping the two together here means a caller does not have to know
-     * which object owns which half.
+     * belongs to the root's own pieces. Keeping the two together here means a caller does not have to
+     * know which object owns which half.
      *
      * **To be changed when roots become several.** This is the only place that picks which root a frame
      * goes to; a multi-root backend routes there instead.

@@ -13,9 +13,9 @@ import kotlinx.coroutines.CoroutineDispatcher
  * ([metadata]), the helpers that answer about the process rather than about one output ([utils]), and
  * the serial dispatcher every framework call hops onto ([dispatcher]).
  *
- * The per-output half - clipboard, capture, narration, sound, links, the session dispatcher - is
- * [WebRootProvider]'s, reached through its `rootUtils`. The split is the contract's: a root must be
- * able to have its own clipboard and its own capture even when it shares this platform.
+ * The per-output half - clipboard, capture, narration, sound, links, the session dispatcher - is the
+ * root's, reached through `DslRoot.rootUtils`. The split is the contract's: a root must be able to
+ * have its own clipboard and its own capture even when it shares this platform.
  */
 internal object WebPlatform : DslPlatform {
     override val metadata: DslPlatformMetadata = WebMetadata

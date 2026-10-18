@@ -250,12 +250,11 @@ class SecondRootTest {
      * ruling, and it is the right one: an answer that silently describes somebody else's tree looks
      * like a correct answer and is not - a loud failure is the cheaper of the two mistakes.
      *
-     * **Criterion (C form - unreachable today): "a component in a root-owned tree reports the focus of
-     * its own tree".** Producing that state needs a way to mount a tree onto a root the runtime
-     * recognises, which does not exist yet; the missing piece is the public root-building capability
-     * (step 5: `registerProvider` / `createRoot`). It is deliberately **not** written as a test here:
-     * there is no way to make it fail today, so any green it produced would be a green that was never
-     * triggered - the failure mode this repository has already paid for more than once.
+     * **Criterion (C form): "a component in a root-owned tree reports the focus of its own tree".**
+     * Producing that state needs the public root-building capability, which now exists: `DslRoot`'s
+     * constructor plus `children.collect` (that mount is what stamps the screen's store). The case
+     * below walks that path; this one deliberately stays on the failing side, because "loud when no
+     * root owns the tree" is the half that must never regress into a quiet answer.
      */
     @Test
     fun `a component in a tree that no root owns fails loud`() {
@@ -277,12 +276,12 @@ class SecondRootTest {
      * onto a hand-made `DslScope` whose child list is a plain group; nothing stamped the screen's
      * `dataStore.rootState`, so the page's first focus read threw while building. The capability was
      * not missing - **the case was not taking the mounting path**. `DslRoot.children` stamps the
-     * store on *every* `collect`, so all it needed was a root obtained from `DslRuntime.createRoot`,
-     * and it now walks that path. Recorded here because "it was red" and "it cannot be done" look
+     * store on *every* `collect`, so all it needed was a root built with the public constructor, and
+     * it now walks that path. Recorded here because "it was red" and "it cannot be done" look
      * identical from a failing test, and only one of them was true.
      *
-     * The root is `TRANSIENT` rather than the process owner: the point is that an outside module can
-     * host framework content on a root of its own, not that the owner root works.
+     * The root is this case's own, not the backend's: the point is that an outside module can host
+     * framework content on a root of its own, not that the backend root works.
      */
     @Test
     fun `a framework page can be built and rendered on a root of its own`() {
