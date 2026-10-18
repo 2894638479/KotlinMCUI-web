@@ -178,13 +178,45 @@ class SecondRootTest {
     }
 
     /**
+     * The lookup a press does is public: an outside root can find the target in its own tree.
+     *
+     * The deleted `acquireFocusFromInput` only wrapped `testHit` plus a writer parameter, and
+     * [DslRoot.setFocus] replaced the parameter. The two pieces stay public separately, so the original
+     * claim survives: each root runs the same lookup against its own children and writes the result to
+     * its own state.
+     */
+    @Test
+    fun `an outside root finds the focus target in its own tree`() {
+        WebTestRuntime.install()
+
+        val rootA = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val rootB = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val probeA = probe("hit-a")
+        val probeB = probe("hit-b")
+        rootA.children.collect(probeA)
+        rootB.children.collect(probeB)
+
+        val mouse = Position(10.px, 10.px)
+        val targetA = rootA.component.testHit(mouse) { it.takeIf { it.focusable } }
+        val targetB = rootB.component.testHit(mouse) { it.takeIf { it.focusable } }
+        assertTrue(targetA === probeA, "A's own tree did not find its focus target")
+        assertTrue(targetB === probeB, "B's own tree did not find its focus target")
+
+        rootA.setFocus(targetA?.identity, FocusSource.MOUSE)
+        assertEquals(
+            listOf<DslId?>(probeA.identity),
+            probeA.focusNotes,
+            "A's own tree did not hear the focus it looked up",
+        )
+        assertTrue(probeB.focusNotes.isEmpty(), "A's lookup reached B's tree: ${probeB.focusNotes}")
+    }
+
+    /**
      * Each root's focus is its own, and a write reaches only the tree it belongs to.
      *
-     * The acquisition lookup used to be a public `DslScope` extension; it is private to the root
-     * component now - `DslRootComponent` is the only thing that presses - so the entry a caller has is
-     * [DslRoot.setFocus]. What outside code can still observe, and what this case pins, is that the
-     * broadcast follows the root's own tree: the component mounted in A hears A's focus, and B's tree
-     * hears nothing.
+     * [DslRoot.setFocus] is the writer; the broadcast it triggers follows the root's own tree, so the
+     * component mounted in A hears A's focus and B's tree hears nothing. The lookup that decides what
+     * to focus is the case above - public, and per-tree for the same reason.
      *
      * This case used to also assert that the process-wide slot was never touched. The singleton was
      * deleted, so that assertion has nothing left to name: there is no process slot to go through any
