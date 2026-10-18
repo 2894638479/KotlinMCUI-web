@@ -2,6 +2,7 @@ package io.github.u2894638479.kotlinmcuiweb
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -41,5 +42,20 @@ class WebUtilsTest {
         assertNotNull(translated)
         assertTrue(translated.contains("a"), translated)
         assertTrue(translated.contains("7"), translated)
+    }
+
+    /**
+     * The session thread is the frame thread, and the flag has to say so from both sides.
+     *
+     * Posting from the frame thread would answer inline, so the positive half is observed by handing
+     * work over from the test thread - which is also the path teardown uses.
+     */
+    @Test
+    fun `isOnSessionThread names the frame thread and only it`() {
+        assertFalse(WebUtils.isOnSessionThread, "the test thread must not claim to be the frame thread")
+
+        var observed = false
+        WebUtils.onFrameThread { observed = WebUtils.isOnSessionThread }
+        assertTrue(observed, "work handed to the frame thread did not run on the session thread")
     }
 }

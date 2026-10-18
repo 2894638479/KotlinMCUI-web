@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
+import io.github.u2894638479.kotlinmcui.backend.DslPlatformMetadata
 import io.github.u2894638479.kotlinmcui.backend.DslPlatform
 import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
@@ -34,7 +34,7 @@ class ForeignPlatformTest {
 
     /** A platform that wins the publication and is not ours. */
     private object ForeignPlatform : DslPlatform {
-        override val metadata: DslBackendMetadata = WebMetadata
+        override val metadata: DslPlatformMetadata = WebMetadata
 
         override val utils: DslPlatformUtils = object : DslPlatformUtils {
             override fun translate(key: String, vararg args: Any?): String? = "foreign:$key"

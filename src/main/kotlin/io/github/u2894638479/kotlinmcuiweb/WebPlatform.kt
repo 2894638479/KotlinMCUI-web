@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
+import io.github.u2894638479.kotlinmcui.backend.DslPlatformMetadata
 import io.github.u2894638479.kotlinmcui.backend.DslPlatform
 import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
 import kotlinx.coroutines.CoroutineDispatcher
@@ -18,7 +18,7 @@ import kotlinx.coroutines.CoroutineDispatcher
  * able to have its own clipboard and its own capture even when it shares this platform.
  */
 internal object WebPlatform : DslPlatform {
-    override val metadata: DslBackendMetadata = WebMetadata
+    override val metadata: DslPlatformMetadata = WebMetadata
 
     override val utils: DslPlatformUtils = WebUtils
 

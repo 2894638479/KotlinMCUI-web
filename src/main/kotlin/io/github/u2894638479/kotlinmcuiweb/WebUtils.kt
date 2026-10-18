@@ -72,6 +72,9 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
     /** Whether the calling thread is the frame thread, which decides between inline and hand-off. */
     internal val isFrameThread: Boolean get() = Thread.currentThread() === frameThreadRef
 
+    /** The contract's name for the same fact: this root's session thread is the frame thread. */
+    override val isOnSessionThread: Boolean get() = isFrameThread
+
     /**
      * Work queued on the frame thread and not started yet.
      *

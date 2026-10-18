@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendScreenHolder
+import io.github.u2894638479.kotlinmcui.backend.DslScreenHolder
 import io.github.u2894638479.kotlinmcui.backend.DslPreview
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.container.DslRoot
@@ -37,8 +37,8 @@ object WebBackend {
 
     internal val currentPage: WebScreen? get() = pages.lastOrNull()
 
-    internal fun create(title: String, dslFunction: DslFunction): DslBackendScreenHolder<WebScreen> =
-        object : DslBackendScreenHolder<WebScreen> {
+    internal fun create(title: String, dslFunction: DslFunction): DslScreenHolder<WebScreen> =
+        object : DslScreenHolder<WebScreen> {
             override val screen = WebScreen(title, dslFunction)
 
             /** Showing a page enters it: it becomes the top of the stack. */
@@ -83,13 +83,18 @@ object WebBackend {
      * backend that closed its root can build the next one without re-asking a question already
      * answered.
      *
+     * Entries launch only after a publication this backend won: the loser's hooks are the winner's to
+     * run, and the runtime ignores a second launch.
+     *
      * `DslPreview.start` has to be called explicitly now. It used to ride along with the publication,
      * so leaving it out does not fail loudly - the preview simply never appears.
      */
     internal fun adoptRoot() {
         if (!platformAttempted) {
             platformAttempted = true
-            if (!DslRuntime.start { WebPlatform }) {
+            if (DslRuntime.start { WebPlatform }) {
+                DslRuntime.launch()
+            } else {
                 dslLogger.warn("web: another backend published this process's platform; this one serves its own root")
             }
         }

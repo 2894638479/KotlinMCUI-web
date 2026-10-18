@@ -1,12 +1,12 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
+import io.github.u2894638479.kotlinmcui.backend.DslRootRenderer
 import io.github.u2894638479.kotlinmcui.component.DslComponent
+import io.github.u2894638479.kotlinmcui.component.FocusSource
 import io.github.u2894638479.kotlinmcui.component.isFocused
 import io.github.u2894638479.kotlinmcui.container.DslChild
 import io.github.u2894638479.kotlinmcui.container.DslDataStore
 import io.github.u2894638479.kotlinmcui.container.DslScope
-import io.github.u2894638479.kotlinmcui.container.acquireFocusFromInput
 import io.github.u2894638479.kotlinmcui.identity.DslId
 import io.github.u2894638479.kotlinmcui.input.PreeditInfo
 import io.github.u2894638479.kotlinmcui.math.Position
@@ -32,10 +32,10 @@ import kotlin.test.assertTrue
  * without answering the question, because an outside module cannot reach one.
  *
  * **What this file can claim.** An outside module can build a root of its own, render its own tree in
- * it, take focus through its own tree with its own writer, and host framework content - the last one
- * by mounting the screen onto a root the runtime created, because **that mount is what stamps the
- * screen's store with a root state**. A component whose tree no root owns still fails loud, which is
- * the ruling: an answer that silently describes somebody else's tree is worse than a loud failure.
+ * it, give it a focus of its own, and host framework content - the last one by mounting the screen onto
+ * a root the runtime created, because **that mount is what stamps the screen's store with a root
+ * state**. A component whose tree no root owns still fails loud, which is the ruling: an answer that
+ * silently describes somebody else's tree is worse than a loud failure.
  */
 class SecondRootTest {
 
@@ -69,13 +69,18 @@ class SecondRootTest {
         override val focusable = true
 
         /**
-         * What this component was told, so hover and preedit have an observer.
+         * What this component was told, so focus, hover and preedit have an observer.
          *
-         * Both are dispatched down each root's own tree, so recording what arrives reads "whose input
-         * reached whom" directly - no geometry guessing on the assertion side.
+         * All three are dispatched down each root's own tree, so recording what arrives reads "whose
+         * input reached whom" directly - no geometry guessing on the assertion side.
          */
+        val focusNotes = mutableListOf<DslId?>()
         val hoverNotes = mutableListOf<DslId?>()
         val preeditNotes = mutableListOf<PreeditInfo>()
+
+        override fun globalFocusChanged(newFocus: DslId?, source: FocusSource) {
+            focusNotes += newFocus
+        }
 
         override fun globalHoverChanged(newHover: DslId?) {
             hoverNotes += newHover
@@ -98,7 +103,7 @@ class SecondRootTest {
         var rendered = false
             private set
 
-        context(backend: DslBackendRenderer<RP>, renderParam: RP, mouse: Position)
+        context(backend: DslRootRenderer<RP>, renderParam: RP, mouse: Position)
         override fun <RP> render() {
             rendered = true
         }
@@ -173,37 +178,36 @@ class SecondRootTest {
     }
 
     /**
-     * Each root decides its own focus, through its own tree, and writes it to its own slot.
+     * Each root's focus is its own, and a write reaches only the tree it belongs to.
      *
-     * `acquireFocusFromInput` is a `DslScope` extension, so any root runs the same lookup against its
-     * own children and hands the identity to its own writer. Two roots therefore hold two independent
-     * focus values.
+     * The acquisition lookup used to be a public `DslScope` extension; it is private to the root
+     * component now - `DslRootComponent` is the only thing that presses - so the entry a caller has is
+     * [DslRoot.setFocus]. What outside code can still observe, and what this case pins, is that the
+     * broadcast follows the root's own tree: the component mounted in A hears A's focus, and B's tree
+     * hears nothing.
      *
      * This case used to also assert that the process-wide slot was never touched. The singleton was
      * deleted, so that assertion has nothing left to name: there is no process slot to go through any
      * more, which is a stronger guarantee than checking that a call avoided one.
      */
     @Test
-    fun `each root takes focus through its own tree and its own writer`() {
+    fun `focus follows each root's own tree`() {
         WebTestRuntime.install()
 
-        val rootA = SecondRoot(1.0, "root-a")
-        val rootB = SecondRoot(3.0, "root-b")
+        val rootA = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        val rootB = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
         val probeA = probe("probe-a")
         val probeB = probe("probe-b")
         rootA.children.collect(probeA)
         rootB.children.collect(probeB)
 
-        var focusA: DslId? = null
-        var focusB: DslId? = null
+        rootA.setFocus(probeA.identity, FocusSource.MOUSE)
+        assertEquals(listOf<DslId?>(probeA.identity), probeA.focusNotes, "A's own tree did not hear A's focus")
+        assertTrue(probeB.focusNotes.isEmpty(), "A's focus reached B's tree: ${probeB.focusNotes}")
 
-        context(Position(10.px, 10.px)) { rootA.acquireFocusFromInput { id, _ -> focusA = id } }
-        assertTrue(focusA === probeA.identity, "A's own tree did not decide A's focus")
-        assertNull(focusB, "A's input reached B's writer")
-
-        context(Position(10.px, 10.px)) { rootB.acquireFocusFromInput { id, _ -> focusB = id } }
-        assertTrue(focusB === probeB.identity, "B's own tree did not decide B's focus")
-        assertTrue(focusA === probeA.identity, "B's input replaced A's focus")
+        rootB.setFocus(probeB.identity, FocusSource.KEYBOARD)
+        assertEquals(listOf<DslId?>(probeB.identity), probeB.focusNotes, "B's own tree did not hear B's focus")
+        assertEquals(listOf<DslId?>(probeA.identity), probeA.focusNotes, "B's focus replaced A's")
     }
 
     /**

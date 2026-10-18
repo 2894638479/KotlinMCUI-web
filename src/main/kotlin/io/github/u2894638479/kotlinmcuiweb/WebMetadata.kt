@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendMetadata
+import io.github.u2894638479.kotlinmcui.backend.DslPlatformMetadata
 import io.github.u2894638479.kotlinmcui.backend.Environment
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -13,11 +13,11 @@ import java.nio.file.Paths
  * plain JVM). The loader is read off the classpath rather than reported by the host, so that a
  * backend hosted by a game and one hosted by nothing report the same thing about themselves.
  *
- * [environment] is [Environment.CLIENT] because a browser is somebody looking at a screen. It is
- * *not* what makes this backend usable on a dedicated server: that is the fact that nothing here
- * needs a client, and it is why a server-side host can publish this backend and get a UI at all.
+ * [environment] is [Environment.NONE]: nothing here needs a game side. The surface is a browser, and
+ * a browser may be looking at a dedicated server's UI just as well as a client's - so the runtime
+ * must not initialise either game entry point on this backend's behalf.
  */
-internal object WebMetadata : DslBackendMetadata {
+internal object WebMetadata : DslPlatformMetadata {
     const val GAME_VERSION_PROPERTY = "kotlinmcuiweb.gameVersion"
 
     /**
@@ -41,7 +41,7 @@ internal object WebMetadata : DslBackendMetadata {
 
     override val gameLoader: String get() = detectedLoader
 
-    override val environment: Environment get() = Environment.CLIENT
+    override val environment: Environment get() = Environment.NONE
 
     private val detectedLoader: String by lazy {
         when {

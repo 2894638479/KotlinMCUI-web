@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendInput
+import io.github.u2894638479.kotlinmcui.backend.DslRootInput
 import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.input.Key
 import io.github.u2894638479.kotlinmcui.input.KeyModifiers
@@ -29,7 +29,7 @@ import java.nio.file.Path
  * it must not take the input path down with it. What the framework gets back is "not consumed",
  * which is exactly what it would have got from a component that ignored the event.
  */
-internal object WebInput : DslBackendInput {
+internal object WebInput : DslRootInput {
     override var mouse = Position(0.px, 0.px)
 
     private val heldKeys = HashSet<Int>()

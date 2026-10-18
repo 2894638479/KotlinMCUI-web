@@ -1,6 +1,6 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslBackendRenderer
+import io.github.u2894638479.kotlinmcui.backend.DslRootRenderer
 import io.github.u2894638479.kotlinmcui.context.DslScaleContext
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
 import io.github.u2894638479.kotlinmcui.math.Color
@@ -31,7 +31,7 @@ import io.github.u2894638479.kotlinmcui.text.DslRenderableChar
  *
  * One instance per process, because the framework publishes one backend per process.
  */
-internal object Recorder : DslBackendRenderer<Unit> {
+internal object Recorder : DslRootRenderer<Unit> {
     private const val INITIAL_WORDS = 1 shl 16
 
     private var words = IntArray(INITIAL_WORDS)
@@ -123,7 +123,7 @@ internal object Recorder : DslBackendRenderer<Unit> {
     override fun renderTriangles(vertices: FloatArray, colors: IntArray, image: ImageHolder?) {
         val count = colors.size
         if (count == 0) return
-        val textured = image != null && !image.isEmpty
+        val textured = image != null && image.id.isNotEmpty()
         val stride = if (textured) 4 else 2
         if (vertices.size < count * stride) return
         val asset = if (textured) assetOf(image) else Op.NO_ASSET
@@ -261,7 +261,7 @@ internal object Recorder : DslBackendRenderer<Unit> {
     }
 
     private fun assetOf(image: ImageHolder?): Int =
-        if (image == null || image.isEmpty) Op.NO_ASSET else assetOf(image.id)
+        if (image == null || image.id.isEmpty()) Op.NO_ASSET else assetOf(image.id)
 
     /**
      * The index of [id], defining it first when it is new.
