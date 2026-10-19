@@ -5,16 +5,17 @@
 
 ## 形态
 
-核心把后端拆成两半，这一仓跟着拆：**`WebPlatform`** 是进程那一半（元数据、进程级工具、调度器），
-**根那一半**是后端自己构造的 `DslRoot`（渲染器 `Recorder`、输入 `WebInput`、屏幕工厂
-`WebScreenFactory`、每输出工具 `WebUtils`）。两半都从服务端状态取答案的工具由同一个 `WebUtils` 实现
-（`DslPlatformUtils` + `DslRootUtils`）——拆成两个对象只是把同一批字段搬来搬去。
+核心不再有"平台对象"这一层：元数据由 `DslRuntime.install { WebMetadata }` 安装，进程级工具由
+`DslRuntime.start { WebUtils }`（`() -> DslPlatformUtils`）发布，`dslUtils` 就是这个工具的入口。
+**根那一半**是本仓自己构造的 `DslRoot`（渲染器 `Recorder`、输入 `WebInput`、屏幕工厂
+`WebScreenFactory`）；同一个 `WebUtils` 同时实现 `DslPlatformUtils` 与 `DslRootUtils`——两组工具都
+从服务端状态取答案，拆成两个对象只是把同一批字段搬来搬去。
 
 多出来的是**帧可以被外部取走**：浏览器按自己的节奏要一帧，`WebBackend.frame()` 把树走一遍、把绘制
 调用记下来，交给传输层。所以这里没有窗口、没有渲染循环，也没有任何 Minecraft 类——它不依赖游戏，
 只依赖核心库。
 
-进程里只发布一个平台（`DslRuntime.start` 只认第一个发布者），**没有 provider 注册这一步**：根由后端
+进程里只发布一份工具（`DslRuntime.start` 只认第一个发布者），**没有 provider 注册这一步**：根由后端
 自己构造，不做注册。所以这个后端要么取代游戏内渲染，要么由宿主自己决定谁发布。宿主可以是独立
 JVM，也可以是游戏内的模组；两种情况下这个后端看到的世界是一样的。
 
@@ -218,32 +219,32 @@ alpha 期这个后端**按单客户端设计**。多连接能工作，但不是�
 - **尺寸归驱动方**，不归根：根的职责是每帧**把 rect 写出去**，来源不归契约管。web 的尺寸来自客户端
   画布，所以记在记录器上、由驱动方在调 `WebBackend.frame()` 之前写入。
 - **`DslRuntime.start` 返回 `false` 不是失败**：一个进程只认第一个发布者，所以第二个后端拿到 `false`
-  是正常结果。它只表示"**本进程的平台不是我的**"，**不表示**"我不能工作"——根照样建、页面照样画，
-  而且**页面的 store 用的是本端自己的平台对象**（翻译、世界状态仍归本端），只有 `dslPlatform` 是
-  别人的。本仓的发布会（`adoptRoot`）**不**在 `false` 上早退，只记一条 warn 说明平台归谁；这条由
-  `ForeignPlatformTest` 钉住（先发布一个外来平台，再断言建根、渲染、以及 `store.platform` 仍是本端的）。
+  是正常结果。它只表示"**本进程的工具不是我的**"，**不表示**"我不能工作"——根照样建、页面照样画，
+  而且**页面的 store 用的是本端自己的 `WebUtils`**（翻译、世界状态仍归本端），只有 `dslUtils` 是
+  别人的。本仓的发布会（`adoptRoot`）**不**在 `false` 上早退，只记一条 warn 说明工具归谁；这条由
+  `ForeignPlatformTest` 钉住（先发布一个外来工具，再断言建根、渲染、以及 `store.utils` 仍是本端的）。
 
 ## 如何验证"两个后端同进程共存"
 
 将来重验这件事，按下面这套走，不必重新发明：
 
 1. **独立的测试类 + 独立 JVM**。`DslRuntime` 是进程单例：`install` 一次、`start` 只发布一次、
-   **先发布者终身获胜** ⇒ 已经发布过本端平台的 JVM **赢不了**这场竞争，所以这一步必须发生在新进程里。
+   **先发布者终身获胜** ⇒ 已经发布过本端工具的 JVM **赢不了**这场竞争，所以这一步必须发生在新进程里。
    本仓靠 `build.gradle.kts` 的 `forkEvery = 1` 提供"每个测试类一个新进程"，**不是可有可无的配置**。
-   **若它失效，用例是红而不是绿**：第一句 `assertTrue(DslRuntime.start { ForeignPlatform })` 就是
-   **前提自检**（重复 `install` 会先抛）。代价不是静默通过，而是**报错指向"平台竞争"而不指向配置**
+   **若它失效，用例是红而不是绿**：第一句 `assertTrue(DslRuntime.start { ForeignUtils })` 就是
+   **前提自检**（重复 `install` 会先抛）。代价不是静默通过，而是**报错指向"发布竞争"而不指向配置**
    —— 所以前提要写在用例上，而不是只写在构建里。
-2. **不要走 `WebTestRuntime`**：它的职责就是发布本端平台。共存用例自建运行时。
-3. **先发布一个外来平台**（自己实现一个 `DslPlatform`，`utils.translate` 返回可识别的字符串），
+2. **不要走 `WebTestRuntime`**：它的职责就是发布本端工具。共存用例自建运行时。
+3. **先发布一个外来工具**（自己实现一个 `DslPlatformUtils`，`translate` 返回可识别的字符串），
    断言它**赢了**。
-4. **然后推本端**：`WebBackend.adoptRoot()` —— 它内部的 `DslRuntime.start { WebPlatform }` 返回
+4. **然后推本端**：`WebBackend.adoptRoot()` —— 它内部的 `DslRuntime.start { WebUtils }` 返回
    **`false`**，只记一条 warn，**根照样建起来**。直接调 `DslRuntime.start` 并断言返回 `false` 也可以。
 5. **在本端建页、渲染**：`WebBackend.create(title) { … }.show()` → `WebBackend.frame(w, h)` ⇒
    断言 `Recorder.size > 0`。
 6. **两条身份断言是这个场景的全部意义**：
-   - `DslDataStore(WebPlatform, WebBackend.root, …).platform === WebPlatform`（页面问世界状态问的是
-     **自己**的平台）；
-   - `dslPlatform === 外来平台`（进程级只认第一发布者；`dslPlatform.utils.translate(...)` 返回外来串）。
-   ⇒ 合起来才是"**平台归进程、渲染归根**"。
+   - `DslDataStore(WebUtils, WebBackend.root, …).utils === WebUtils`（页面问世界状态问的是
+     **自己**的工具）；
+   - `dslUtils === 外来工具`（进程级只认第一发布者；`dslUtils.translate(...)` 返回外来串）。
+   ⇒ 合起来才是"**工具归进程、渲染归根**"。
 7. **失败时最先看**：`DslRuntime.start` 是不是返回了 `true`（说明 JVM 被污染了，或用例跑在了别人
    之后）。这一条比断言消息更能定位问题。

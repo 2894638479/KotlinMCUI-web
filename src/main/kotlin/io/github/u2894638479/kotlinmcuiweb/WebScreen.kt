@@ -1,6 +1,5 @@
 package io.github.u2894638479.kotlinmcuiweb
 
-import io.github.u2894638479.kotlinmcui.backend.DslRuntime
 import io.github.u2894638479.kotlinmcui.container.DslChild
 import io.github.u2894638479.kotlinmcui.container.DslDataStore
 import io.github.u2894638479.kotlinmcui.dsl.DslFunction
@@ -9,8 +8,8 @@ import io.github.u2894638479.kotlinmcui.dsl.DslFunction
  * One page of the web UI: the framework screen and the state that belongs to it.
  *
  * The framework wants two things from a screen - a [DslDataStore] and a [io.github.u2894638479.kotlinmcui.container.DslScreen]
- * - and this is where both come from, exactly as in the other backends. The store takes the platform
- * and the root provider separately now, because the contract separates what the process knows from
+ * - and this is where both come from, exactly as in the other backends. The store takes the process
+ * utils and the root separately now, because the contract separates what the process knows from
  * what one output answers for itself.
  *
  * A page is closed by leaving it: the close action pops the stack, so `closeScreen()` and the
@@ -24,7 +23,7 @@ class WebScreen internal constructor(
     private var child: DslChild? = null
     private var released = false
 
-    val dataStore = DslDataStore(WebPlatform, WebBackend.root, title, { WebBackend.pop() }, dslFunction)
+    val dataStore = DslDataStore(WebUtils, WebBackend.root, title, { WebBackend.pop() }, dslFunction)
 
     val dslScreen = dataStore.dslScreen
 

@@ -3,6 +3,7 @@ package io.github.u2894638479.kotlinmcuiweb
 import io.github.u2894638479.kotlinmcui.backend.DslRootRenderer
 import io.github.u2894638479.kotlinmcui.context.DslScaleContext
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
+import io.github.u2894638479.kotlinmcui.image.ImageSource
 import io.github.u2894638479.kotlinmcui.math.Color
 import io.github.u2894638479.kotlinmcui.math.Measure
 import io.github.u2894638479.kotlinmcui.math.rect.Rect
@@ -123,7 +124,7 @@ internal object Recorder : DslRootRenderer<Unit> {
     override fun renderTriangles(vertices: FloatArray, colors: IntArray, image: ImageHolder?) {
         val count = colors.size
         if (count == 0) return
-        val textured = image != null && image.id.isNotEmpty()
+        val textured = imageId(image) != null
         val stride = if (textured) 4 else 2
         if (vertices.size < count * stride) return
         val asset = if (textured) assetOf(image) else Op.NO_ASSET
@@ -261,7 +262,28 @@ internal object Recorder : DslRootRenderer<Unit> {
     }
 
     private fun assetOf(image: ImageHolder?): Int =
-        if (image == null || image.id.isEmpty()) Op.NO_ASSET else assetOf(image.id)
+        imageId(image)?.let(::assetOf) ?: Op.NO_ASSET
+
+    /**
+     * The id a holder travels under, or `null` when there is nothing to draw.
+     *
+     * The three sources are three different namespaces for the client: a resource is the framework's
+     * own `namespace:path` id, a local file is this backend's `local:` id (the transport serves it
+     * only because [WebUtils.localImage] described that path), and a remote url is the url itself.
+     * Which of them it is cannot be confused, because [ImageSource] is a type rather than a prefix.
+     *
+     * An empty id is the old, harmless way of saying "no image", kept as "no asset" rather than
+     * written into the frame as a zero-length texture definition.
+     */
+    private fun imageId(image: ImageHolder?): String? {
+        val source = image?.source ?: return null
+        val id = when (source) {
+            is ImageSource.LocalFile -> WebUtils.localImageId(source.file)
+            is ImageSource.Resource -> source.location
+            is ImageSource.Remote -> source.url
+        }
+        return id.takeIf { it.isNotEmpty() }
+    }
 
     /**
      * The index of [id], defining it first when it is new.

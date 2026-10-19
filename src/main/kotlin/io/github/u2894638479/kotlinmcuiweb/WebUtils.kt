@@ -3,6 +3,7 @@ package io.github.u2894638479.kotlinmcuiweb
 import io.github.u2894638479.kotlinmcui.backend.DslPlatformUtils
 import io.github.u2894638479.kotlinmcui.backend.DslRootUtils
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
+import io.github.u2894638479.kotlinmcui.image.ImageSource
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import io.github.u2894638479.kotlinmcui.math.px
 import kotlinx.coroutines.CoroutineDispatcher
@@ -27,9 +28,9 @@ import javax.imageio.ImageIO
  * frame is recorded - and the clipboard is mirrored rather than read. What cannot be answered here is
  * a request for pixels that live in the browser, which is why [capture] waits for the transport.
  *
- * The local images are only *described* here: [loadLocalImage] reads a file's size so layout works and
- * remembers it, and the transport serves the bytes when a client asks for that id. Nothing else may
- * be served for a `local:` id, so a client cannot name a path of its own.
+ * The local images are only *described* here: [localImage] reads a file's size so layout works and
+ * remembers it, and the transport serves the bytes when a client asks for the id the recorder wrote
+ * for that file. Nothing else may be served for a `local:` id, so a client cannot name a path of its own.
  *
  * [sessionDispatcher] is a single thread on purpose. The framework's context is thread-confined - it
  * records the thread that created it and refuses to be touched from another - so a backend hosted by
@@ -212,27 +213,44 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
      * A local image, described but not read.
      *
      * The contract wants an answer immediately, so this reads the *size* - which is what layout and
-     * UV mapping need - and leaves the pixels to the transport: the id it returns is what the client
-     * asks for, and it is derived from the path so a second call answers from the cache.
+     * UV mapping need - and leaves the pixels to the transport. The holder names the file; the
+     * recorder turns that into the id the client asks for, and the id is derived from the path so a
+     * second call answers from the cache.
      */
-    override fun loadLocalImage(file: File): ImageHolder {
-        val id = LOCAL_PREFIX + file.absolutePath
-        return localImages.getOrPut(id) {
-            val size = runCatching { ImageIO.read(file) }.getOrNull()
-            if (size == null) {
-                dslLogger.warn("web assets: '$file' could not be read, the client will draw its placeholder")
-                ImageHolder.empty
-            } else {
-                ImageHolder(id, size.width.px, size.height.px)
-            }
+    override fun localImage(file: File): ImageHolder = localImages.getOrPut(localImageId(file)) {
+        val size = runCatching { ImageIO.read(file) }.getOrNull()
+        if (size == null) {
+            dslLogger.warn("web assets: '$file' could not be read, the client will draw its placeholder")
+            ImageHolder.empty
+        } else {
+            ImageHolder(ImageSource.LocalFile(file), size.width.px, size.height.px)
         }
     }
 
     /** The same, with the cache dropped, so the transport serves the file as it is now. */
-    override fun forceLoadLocalImage(file: File): ImageHolder {
-        localImages.remove(LOCAL_PREFIX + file.absolutePath)
-        return loadLocalImage(file)
+    override fun reloadLocalImage(file: File) {
+        localImages.remove(localImageId(file))
     }
+
+    /**
+     * A remote image: nothing to draw yet.
+     *
+     * The contract forbids waiting on io here, so this cannot download anything. A transport that
+     * gains a downloader can start answering from a cache; until then `empty` is the honest answer,
+     * and a page that uses one draws the client's placeholder.
+     */
+    override fun remoteImage(url: String): ImageHolder = ImageHolder.empty
+
+    /** Nothing is cached, so there is nothing to drop. */
+    override fun reloadRemoteImage(url: String) = Unit
+
+    /**
+     * The id the recorder writes for a local file.
+     *
+     * The transport serves only the files a page described, so the path travels under a prefix of
+     * this backend's own and [localImageFile] is the only thing that turns it back into a file.
+     */
+    internal fun localImageId(file: File): String = LOCAL_PREFIX + file.absolutePath
 
     /**
      * The file behind a `local:` id, or null if this backend never described it.
@@ -241,7 +259,7 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
      * offered a page - a client cannot name a path of its own.
      */
     internal fun localImageFile(id: String): File? =
-        localImages[id]?.takeIf { it !== ImageHolder.empty }?.let { File(id.removePrefix(LOCAL_PREFIX)) }?.takeIf { it.isFile }
+        (localImages[id]?.source as? ImageSource.LocalFile)?.file?.takeIf { it.isFile }
 
     override fun playButtonSound() {
         // The client has the audio device; the transport turns this into a message.

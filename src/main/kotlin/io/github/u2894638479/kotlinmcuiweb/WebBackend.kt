@@ -16,9 +16,9 @@ import io.github.u2894638479.kotlinmcui.math.px
  * of pages, because the framework's own screen model is a stack (`showScreen` enters a page, closing
  * it goes back).
  *
- * The pieces it used to be assembled from now live where the contract puts them: metadata and the
- * process helpers on [WebPlatform], recording/input/screens on [Recorder], [WebInput] and
- * [WebScreenFactory], and the helpers one output answers for itself on [WebUtils].
+ * The pieces it used to be assembled from now live where the contract puts them: metadata installed
+ * through [DslRuntime.install], the process helpers and the per-output helpers both on [WebUtils],
+ * and recording/input/screens on [Recorder], [WebInput] and [WebScreenFactory].
  */
 object WebBackend {
 
@@ -92,7 +92,7 @@ object WebBackend {
     internal fun adoptRoot() {
         if (!platformAttempted) {
             platformAttempted = true
-            if (DslRuntime.start { WebPlatform }) {
+            if (DslRuntime.start { WebUtils }) {
                 DslRuntime.launch()
             } else {
                 dslLogger.warn("web: another backend published this process's platform; this one serves its own root")
