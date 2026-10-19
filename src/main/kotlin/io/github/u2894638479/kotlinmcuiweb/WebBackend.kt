@@ -123,10 +123,15 @@ object WebBackend {
      * belongs to the root's own pieces. Keeping the two together here means a caller does not have to
      * know which object owns which half.
      *
+     * The frame is also the backend's clock for the image cache: sweeping here is what makes the
+     * expiry once per frame rather than a timer of its own, and this runs on the frame thread, which
+     * is the only thread allowed to change that cache.
+     *
      * **To be changed when roots become several.** This is the only place that picks which root a frame
      * goes to; a multi-root backend routes there instead.
      */
     internal fun frame(width: Int, height: Int) {
+        WebUtils.sweepLocalImages()
         Recorder.beginFrame()
         Recorder.surfaceWidth = width
         Recorder.surfaceHeight = height

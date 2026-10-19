@@ -7,10 +7,15 @@ import io.github.u2894638479.kotlinmcui.image.ImageSource
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import io.github.u2894638479.kotlinmcui.math.px
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.awt.image.BufferedImage
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
@@ -18,7 +23,9 @@ import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 import javax.imageio.ImageIO
+import kotlin.concurrent.withLock
 
 /**
  * The non-drawing half of the backend contract, for a client that is on the other side of a socket.
@@ -28,9 +35,13 @@ import javax.imageio.ImageIO
  * frame is recorded - and the clipboard is mirrored rather than read. What cannot be answered here is
  * a request for pixels that live in the browser, which is why [capture] waits for the transport.
  *
- * The local images are only *described* here: [localImage] reads a file's size so layout works and
- * remembers it, and the transport serves the bytes when a client asks for the id the recorder wrote
- * for that file. Nothing else may be served for a `local:` id, so a client cannot name a path of its own.
+ * The local images are only *described* here: [localImage] answers from a cache, and the first time
+ * a file is seen its size is read on [Dispatchers.IO] rather than on the frame thread the contract
+ * hands it to - the frame thread gets [ImageHolder.empty] back and the size is published to the
+ * cache, on the frame thread, once the read is done. The transport serves the bytes when a client
+ * asks for the id the recorder wrote for that file. Nothing else may be served for a `local:` id, so
+ * a client cannot name a path of its own. Entries nothing has asked for in a while are swept once per
+ * frame; see [sweepLocalImages].
  *
  * [sessionDispatcher] is a single thread on purpose. The framework's context is thread-confined - it
  * records the thread that created it and refuses to be touched from another - so a backend hosted by
@@ -116,7 +127,61 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
         failure?.let { throw it }
     }
 
-    private val localImages = HashMap<String, ImageHolder>()
+    /**
+     * Local images by the id the recorder writes for them, with the last time each was asked for.
+     *
+     * The key is the id and not the file, because [localImageFile] is the only thing that turns an id
+     * back into a path: a file a page never named has no entry, so it cannot be served.
+     *
+     * A plain [HashMap] is enough because the frame thread is the only thread that changes it -
+     * [localImage], [reloadLocalImage] and [sweepLocalImages] all run there, and the background size
+     * read never touches it: what it learns is handed back to the frame thread, which writes it.
+     *
+     * A null [CacheEntry.holder] means "still being read"; [ImageHolder.empty] is a finished answer
+     * that the file could not be read, remembered so a broken file is warned about once rather than
+     * reopened every frame.
+     */
+    private val localImages = HashMap<String, CacheEntry>()
+
+    private class CacheEntry(val file: File, var lastUsed: Long, var holder: ImageHolder?)
+
+    /**
+     * Where a file's size is read.
+     *
+     * [Dispatchers.IO] is daemon-backed, which is what lets a headless `measure` or a stopping server
+     * exit while a read is still in flight: no thread here keeps the process alive, and a read that
+     * never resumes has nobody waiting on it.
+     */
+    private val imageLoader = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** The wall clock, injectable so the ttl can be tested by moving time instead of sleeping. */
+    internal var wallClock: () -> Long = System::currentTimeMillis
+
+    /** Background size reads that have not published yet; guarded by [loads] and changed on the frame thread. */
+    private var loadingImages = 0
+
+    private val loads = ReentrantLock()
+
+    private val loadsSettled = loads.newCondition()
+
+    /**
+     * Wait until every background size read has published, or [timeoutMillis] passes.
+     *
+     * Test-facing: the frame thread never waits for an image, so this exists for the one thing the
+     * contract needs said out loud - that the reading happens at all. It must not be called from the
+     * frame thread, which is the thread that publishes.
+     */
+    internal fun awaitLocalImageLoads(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        loads.withLock {
+            while (loadingImages > 0) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return false
+                loadsSettled.awaitNanos(remaining)
+            }
+            return true
+        }
+    }
 
     override var clipboard: String = ""
 
@@ -210,25 +275,84 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
     override val isInWorld: Boolean get() = false
 
     /**
-     * A local image, described but not read.
+     * A local image, described but not read on this thread.
      *
-     * The contract wants an answer immediately, so this reads the *size* - which is what layout and
-     * UV mapping need - and leaves the pixels to the transport. The holder names the file; the
-     * recorder turns that into the id the client asks for, and the id is derived from the path so a
-     * second call answers from the cache.
+     * The contract runs this on the frame thread and forbids it to wait for io, so it only reads the
+     * cache: a known file refreshes its entry and answers at once, and an unknown one starts a
+     * background read and answers [ImageHolder.empty] - "nothing to draw yet", which is exactly what
+     * the framework draws for an image that has not arrived. The next call, once the read has
+     * published, answers with the file's size.
+     *
+     * The id is derived from the path, so the same file asked for twice is one entry and one read.
      */
-    override fun localImage(file: File): ImageHolder = localImages.getOrPut(localImageId(file)) {
-        val size = runCatching { ImageIO.read(file) }.getOrNull()
-        if (size == null) {
-            dslLogger.warn("web assets: '$file' could not be read, the client will draw its placeholder")
-            ImageHolder.empty
-        } else {
-            ImageHolder(ImageSource.LocalFile(file), size.width.px, size.height.px)
+    override fun localImage(file: File): ImageHolder {
+        val id = localImageId(file)
+        val cached = localImages[id]
+        if (cached != null) {
+            cached.lastUsed = wallClock()
+            return cached.holder ?: ImageHolder.empty
+        }
+        val entry = CacheEntry(file, wallClock(), holder = null)
+        localImages[id] = entry
+        loads.withLock { loadingImages++ }
+        imageLoader.launch {
+            val size = runCatching { ImageIO.read(file) }.getOrNull()
+            if (size == null) {
+                dslLogger.warn("web assets: '$file' could not be read, the client will draw its placeholder")
+            }
+            publishLocalImage(id, entry, size)
+        }
+        return ImageHolder.empty
+    }
+
+    /**
+     * Put a background read's answer where the cache is allowed to change: back on the frame thread.
+     *
+     * The entry is matched by identity, not by id: a [reloadLocalImage] during the read removed that
+     * entry, and this answer belongs to the entry that is gone - writing it back would resurrect a
+     * file the page has already dropped.
+     */
+    private fun publishLocalImage(id: String, entry: CacheEntry, size: BufferedImage?) {
+        val queued = runCatching {
+            framePool.execute {
+                if (localImages[id] === entry) {
+                    entry.holder = size
+                        ?.let { ImageHolder(ImageSource.LocalFile(entry.file), it.width.px, it.height.px) }
+                        ?: ImageHolder.empty
+                }
+                settleLocalImageLoad()
+            }
+        }.isSuccess
+        if (!queued) settleLocalImageLoad()
+    }
+
+    private fun settleLocalImageLoad() = loads.withLock {
+        loadingImages--
+        loadsSettled.signalAll()
+    }
+
+    /**
+     * Drop the entries nothing has asked for within [LOCAL_IMAGE_TTL_MILLIS].
+     *
+     * Called once per frame from `WebBackend.frame`, which happens on the frame thread, so this is
+     * neither a timer nor a concurrent operation. A page that still draws an image asks for it while
+     * it builds the frame, which refreshes its entry, so what the sweep drops is the images a page
+     * has stopped using - keeping the map bounded by what the current pages actually draw.
+     */
+    internal fun sweepLocalImages(now: Long = wallClock()) {
+        val entries = localImages.entries.iterator()
+        while (entries.hasNext()) {
+            if (now - entries.next().value.lastUsed > LOCAL_IMAGE_TTL_MILLIS) entries.remove()
         }
     }
 
+    /** Whether [file] has an entry, loading or answered. Test-facing: the cache has no other observer. */
+    internal fun isLocalImageCached(file: File): Boolean = localImages.containsKey(localImageId(file))
+
     /** The same, with the cache dropped, so the transport serves the file as it is now. */
     override fun reloadLocalImage(file: File) {
+        // The failed reads are entries too, so this is also what lets a file that appeared since be
+        // picked up: the next call starts over rather than answering from the remembered failure.
         localImages.remove(localImageId(file))
     }
 
@@ -253,13 +377,16 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
     internal fun localImageId(file: File): String = LOCAL_PREFIX + file.absolutePath
 
     /**
-     * The file behind a `local:` id, or null if this backend never described it.
+     * The file behind a `local:` id, or null if this backend never described it *or* the description
+     * is not finished yet.
      *
      * The asset endpoint asks before it reads anything, so an id is only ever a file this process
-     * offered a page - a client cannot name a path of its own.
+     * offered a page - a client cannot name a path of its own. The lookup itself is a plain map read
+     * because the transport asks from the connection's own thread; it is the *frame* thread that is
+     * forbidden to read the file, and it never does.
      */
     internal fun localImageFile(id: String): File? =
-        (localImages[id]?.source as? ImageSource.LocalFile)?.file?.takeIf { it.isFile }
+        (localImages[id]?.holder?.source as? ImageSource.LocalFile)?.file?.takeIf { it.isFile }
 
     override fun playButtonSound() {
         // The client has the audio device; the transport turns this into a message.
@@ -300,6 +427,16 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
 
     /** Ids this backend mints for a file it described; only those may be served as a file. */
     internal const val LOCAL_PREFIX = "local:"
+
+    /**
+     * How long a local image entry nothing has asked for survives the once-a-frame sweep.
+     *
+     * A page that draws an image asks for it on every frame it builds, so a minute is long enough to
+     * cover a page whose tree is rebuilt only when something changes, and short enough that images a
+     * page has stopped showing do not accumulate. Eviction changes nothing a frame records: only
+     * later calls can tell, and they start a new read.
+     */
+    internal const val LOCAL_IMAGE_TTL_MILLIS = 60_000L
 
     /** The frame thread's name, which a log line and a thread dump both use to identify it. */
     private const val FRAME_THREAD_NAME = "kotlinmcui-web"
