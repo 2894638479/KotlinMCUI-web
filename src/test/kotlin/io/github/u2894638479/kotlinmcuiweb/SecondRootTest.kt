@@ -202,7 +202,7 @@ class SecondRootTest {
         assertTrue(targetA === probeA, "A's own tree did not find its focus target")
         assertTrue(targetB === probeB, "B's own tree did not find its focus target")
 
-        rootA.setFocus(targetA?.identity, FocusSource.MOUSE)
+        rootA.setFocus(targetA.identity, FocusSource.MOUSE)
         assertEquals(
             listOf<DslId?>(probeA.identity),
             probeA.focusNotes,
