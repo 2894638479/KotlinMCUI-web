@@ -92,7 +92,9 @@ internal object Recorder : DslRootRenderer<Unit> {
     fun assetTable(): List<Pair<Int, String>> = assets.entries.sortedBy { it.value }.map { it.value to it.key }
 
     context(renderParam: Unit)
-    override fun flush() {
+    fun flush() {
+        // The frame's own end marker. The core no longer calls this: it is the recorder's way of saying
+        // "one frame's worth of ops ends here", and every consumer ignores the word.
         put(Op.FLUSH)
         counts[Op.FLUSH]++
     }
