@@ -255,6 +255,7 @@ internal object SvgWriter {
     private fun clipCorners(frame: IntArray, at: Int, transform: Matrix): List<Pair<Float, Float>>? {
         val rect = bounds(frame, at + 1) ?: return null
         if (!rect.all { it.isFinite() }) return null
+        if (!(rect[2] - rect[0]).isFinite() || !(rect[3] - rect[1]).isFinite()) return null
         if (!(rect[2] > rect[0]) || !(rect[3] > rect[1])) return null
         if (!transform.isInvertible()) return null
         val corners = listOf(

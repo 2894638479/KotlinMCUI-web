@@ -217,9 +217,9 @@ internal object Recorder : DslRootRenderer<Unit> {
             putMeasure(rect.top, raw, 1) &&
             putMeasure(rect.right, raw, 2) &&
             putMeasure(rect.bottom, raw, 3)
-        val drawable = measured &&
-            Float.fromBits(raw[2]) > Float.fromBits(raw[0]) &&
-            Float.fromBits(raw[3]) > Float.fromBits(raw[1])
+        val width = Float.fromBits(raw[2]) - Float.fromBits(raw[0])
+        val height = Float.fromBits(raw[3]) - Float.fromBits(raw[1])
+        val drawable = measured && width.isFinite() && height.isFinite() && width > 0f && height > 0f
         put(Op.CLIP_PUSH)
         if (drawable) {
             put(raw[0]); put(raw[1]); put(raw[2]); put(raw[3])

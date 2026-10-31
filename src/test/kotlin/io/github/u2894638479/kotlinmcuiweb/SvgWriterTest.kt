@@ -219,6 +219,17 @@ class SvgWriterTest {
     }
 
     @Test
+    fun `finite clip edges with overflowing Float extents are empty`() {
+        for (rect in listOf(floatArrayOf(-3e38f, 0f, 3e38f, 40f), floatArrayOf(0f, -3e38f, 40f, 3e38f))) {
+            val words = intArrayOf(Op.CLIP_PUSH, *rect.map(Float::toRawBits).toIntArray(), Op.CLIP_POP)
+            val document = documentOf(words, 64, 64)
+            val clip = document.getElementsByTagName("clipPath").item(0) as org.w3c.dom.Element
+            val polygon = clip.getElementsByTagName("polygon").item(0) as org.w3c.dom.Element
+            assertEquals(0.0, areaOf(polygon))
+        }
+    }
+
+    @Test
     fun `valid scaled clip transforms do not become empty diagnostics`() {
         for ((matrix, rect) in listOf(
             floatArrayOf(1e-5f,0f,0f,0f,1e-5f,0f,0f,0f,1e-5f) to floatArrayOf(10f,10f,60f,60f),

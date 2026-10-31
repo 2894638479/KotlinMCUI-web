@@ -398,6 +398,7 @@ function clipCorners(words, at, transform) {
   const left = floatOf(words[at]), top = floatOf(words[at + 1]);
   const right = floatOf(words[at + 2]), bottom = floatOf(words[at + 3]);
   if (![left, top, right, bottom].every(Number.isFinite)) return null;
+  if (!Number.isFinite(Math.fround(right - left)) || !Number.isFinite(Math.fround(bottom - top))) return null;
   if (!(right > left) || !(bottom > top)) return null;
   if (!invertible(transform)) return null;
   const points = [

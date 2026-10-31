@@ -1900,6 +1900,8 @@ test('empty, nonfinite and degenerate clip rectangles fail closed', () => {
     ['negative width', [40, 0, 10, 40]],
     ['zero height', [0, 10, 40, 10]],
     ['negative height', [0, 40, 40, 10]],
+    ['overflow width', [-3e38, 0, 3e38, 40]],
+    ['overflow height', [0, -3e38, 40, 3e38]],
   ];
   for (const [name, rect] of rectangles) {
     const { api, state, screen } = createClient();

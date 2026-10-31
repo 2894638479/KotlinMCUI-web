@@ -31,6 +31,8 @@ class RecorderClipTest {
             "zero width" to Rect(5.px, 0.px, 5.px, 10.px),
             "reversed" to Rect(10.px, 0.px, 5.px, 10.px),
             "zero height" to Rect(0.px, 5.px, 10.px, 5.px),
+            "overflow width" to Rect((-3e38).px, 0.px, 3e38.px, 10.px),
+            "overflow height" to Rect(0.px, (-3e38).px, 10.px, 3e38.px),
         )
 
         for ((name, rect) in rectangles) {
