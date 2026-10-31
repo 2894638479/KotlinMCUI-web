@@ -17,12 +17,13 @@ import java.util.Locale
  * shapes, not to axis-aligned rectangles - which is exactly the freedom the Minecraft backends do not
  * have.
  *
- * Two deliberate approximations, both noted in the file itself: a quad whose four corner colours are
- * not affine-related is emitted as the two triangles the game's backends draw (not the bilinear field
- * a canvas can produce), and textured records are diagnostic checkerboard polygons carrying their
- * asset id, UVs and nominal size. This writer has no texture server and no pixels; it cannot prove
- * what the browser sampled. The checkerboard is therefore explicitly a diagnostic marker, never a
- * claim that the draw fell back to a colour.
+ * This writer is a DIAGNOSTIC, not a renderer. It has no texture server and no pixels, so textured
+ * records are checkerboard polygons carrying their asset id, geometry and nominal size; that checker is a
+ * marker for "a texture was sampled here", never a claim about the pixels. A four-corner bilinear
+ * field and a barycentric triangle field cannot be expressed by one SVG fill, so they are sampled on
+ * a coarse grid of flat-coloured polygons (SVG has no four-corner interpolant) and are therefore an
+ * approximation. The browser client is the conforming consumer; this file must not be read as a
+ * pixel-exact reference.
  */
 internal object SvgWriter {
     fun write(frame: IntArray, size: Int, width: Int, height: Int, file: File) {
@@ -110,18 +111,41 @@ internal object SvgWriter {
                     "stroke=\"#d8d8d8\" stroke-dasharray=\"3 3\">" +
                     "<title>texture asset #$asset uv=[${number(u0)},${number(v0)},${number(u1)},${number(v1)}] " +
                     "nominal=${number(nominalWidth)}x${number(nominalHeight)} " +
-                    "(diagnostic checkerboard: no pixels in SVG)</title></polygon>\n",
+                    "(diagnostic checkerboard: no pixels or tint in SVG)</title></polygon>\n",
             )
             return
         }
-        val title = ""
         if (lt == rt && lt == lb && lt == rb) {
-            svg.append("<polygon points=\"${rectPoints(corners)}\" fill=\"${css(lt)}\">$title</polygon>\n")
+            svg.append("<polygon points=\"${rectPoints(corners)}\" fill=\"${css(lt)}\"/>\n")
             return
         }
-        // The two triangles the game's backends draw, in the same (lt, rt, lb) and (rt, rb, lb) order.
-        svg.append("<polygon points=\"${points(corners[0], corners[1], corners[2])}\" fill=\"${css(mix(lt, rt, lb, lb))}\">$title</polygon>\n")
-        svg.append("<polygon points=\"${points(corners[1], corners[3], corners[2])}\" fill=\"${css(mix(rt, rb, lb, lb))}\"/>\n")
+        // A four-corner bilinear field has no single SVG fill. Sample it on a coarse grid in the
+        // quad's ORIGINAL coordinates, project each grid vertex, and fill each cell with the field
+        // at its centre. The result is an approximation (the writer says so) but it follows the
+        // same local coordinate system, including a projective transform.
+        val colours = intArrayOf(lt, rt, lb, rb)
+        svg.append("<g shape-rendering=\"crispEdges\"><title>bilinear quad field sampled on a ${MESH}x$MESH grid (approximation)</title>\n")
+        for (i in 0 until MESH) {
+            for (j in 0 until MESH) {
+                val u0 = i.toDouble() / MESH
+                val u1 = (i + 1).toDouble() / MESH
+                val v0 = j.toDouble() / MESH
+                val v1 = (j + 1).toDouble() / MESH
+                val cu = (u0 + u1) / 2
+                val cv = (v0 + v1) / 2
+                val cell = listOf(
+                    transform.project(lerp(rect[0], rect[2], u0), lerp(rect[1], rect[3], v0)),
+                    transform.project(lerp(rect[0], rect[2], u1), lerp(rect[1], rect[3], v0)),
+                    transform.project(lerp(rect[0], rect[2], u1), lerp(rect[1], rect[3], v1)),
+                    transform.project(lerp(rect[0], rect[2], u0), lerp(rect[1], rect[3], v1)),
+                )
+                val colour = fieldColour(colours, doubleArrayOf(
+                    (1 - cu) * (1 - cv), cu * (1 - cv), (1 - cu) * cv, cu * cv,
+                ))
+                svg.append("<polygon points=\"${points(cell)}\" fill=\"${css(colour)}\"/>\n")
+            }
+        }
+        svg.append("</g>\n")
     }
 
     private fun triangles(svg: StringBuilder, frame: IntArray, at: Int, transform: Matrix) {
@@ -146,11 +170,17 @@ internal object SvgWriter {
                     "<polygon points=\"${points(projected)}\" fill=\"url(#texture-checker)\" " +
                         "stroke=\"#d8d8d8\" stroke-dasharray=\"3 3\">" +
                         "<title>texture asset #$asset nominal=${number(nominalWidth)}x${number(nominalHeight)} " +
-                        "(diagnostic checkerboard: no pixels in SVG)</title></polygon>\n",
+                        "(diagnostic checkerboard: no pixels or tint in SVG)</title></polygon>\n",
                 )
             } else {
-                val colour = mix(frame[coloursAt + i], frame[coloursAt + i + 1], frame[coloursAt + i + 2], 0)
-                svg.append("<polygon points=\"${points(projected)}\" fill=\"${css(colour)}\"/>\n")
+                val local = (0..2).map { step ->
+                    val base = verticesAt + (i + step) * stride
+                    Float.fromBits(frame[base]) to Float.fromBits(frame[base + 1])
+                }
+                val colours = intArrayOf(
+                    frame[coloursAt + i], frame[coloursAt + i + 1], frame[coloursAt + i + 2],
+                )
+                meshTriangle(svg, local, colours, transform)
             }
             i += 3
         }
@@ -249,24 +279,94 @@ internal object SvgWriter {
         }
     }
 
-    /** The average of up to four packed colours: what a triangle of that set is filled with here. */
-    private fun mix(a: Int, b: Int, c: Int, d: Int): Int {
-        var r = 0
-        var g = 0
-        var bl = 0
-        var al = 0
-        var count = 0
-        for (packed in intArrayOf(a, b, c, d)) {
-            if (packed == 0) continue
-            r += (packed ushr 24) and 0xFF
-            g += (packed ushr 16) and 0xFF
-            bl += (packed ushr 8) and 0xFF
-            al += packed and 0xFF
-            count += 1
+    private fun lerp(a: Float, b: Float, t: Double): Float = (a + (b - a) * t).toFloat()
+
+    /**
+     * The field at the given vertex weights, as a straight packed colour.
+     *
+     * Premultiply each corner, weight the premultiplied RGB and the alpha, then divide the colour
+     * back out by the resulting alpha for SVG's straight `rgba()`. This is the same arithmetic the
+     * browser applies; the SVG only approximates it by using one flat sample per mesh cell.
+     */
+    private fun fieldColour(colours: IntArray, weights: DoubleArray): Int {
+        var red = 0.0
+        var green = 0.0
+        var blue = 0.0
+        var alpha = 0.0
+        for (index in colours.indices) {
+            val packed = colours[index]
+            val a = (packed and 0xFF).toDouble()
+            red += ((packed ushr 24) and 0xFF) * a / 255.0 * weights[index]
+            green += ((packed ushr 16) and 0xFF) * a / 255.0 * weights[index]
+            blue += ((packed ushr 8) and 0xFF) * a / 255.0 * weights[index]
+            alpha += a * weights[index]
         }
-        if (count == 0) return 0
-        return (((r / count) and 0xFF) shl 24) or (((g / count) and 0xFF) shl 16) or
-            (((bl / count) and 0xFF) shl 8) or ((al / count) and 0xFF)
+        if (alpha <= 0.0) return 0
+        val scale = 255.0 / alpha
+        return (channel(red * scale) shl 24) or (channel(green * scale) shl 16) or
+            (channel(blue * scale) shl 8) or channel(alpha)
+    }
+
+    private fun channel(value: Double): Int =
+        Math.round(value).toInt().coerceIn(0, 255)
+
+    /**
+     * A triangle's barycentric field, sampled on a coarse barycentric grid.
+     *
+     * SVG has no barycentric fill, so each sub-triangle is a flat polygon coloured at its centroid.
+     * The geometry is exact - every sub-triangle is a real sub-triangle of the recorded one, placed
+     * through the same projection - while the colour is an approximation, and the group says so.
+     */
+    private fun meshTriangle(
+        svg: StringBuilder,
+        local: List<Pair<Float, Float>>,
+        colours: IntArray,
+        transform: Matrix,
+    ) {
+        val a = local[0]
+        val b = local[1]
+        val c = local[2]
+        fun point(i: Int, j: Int): Pair<Float, Float> {
+            val wa = (MESH - i - j).toFloat() / MESH
+            val wb = i.toFloat() / MESH
+            val wc = j.toFloat() / MESH
+            return transform.project(
+                a.first * wa + b.first * wb + c.first * wc,
+                a.second * wa + b.second * wb + c.second * wc,
+            )
+        }
+        fun weights(i: Int, j: Int): DoubleArray =
+            doubleArrayOf((MESH - i - j).toDouble() / MESH, i.toDouble() / MESH, j.toDouble() / MESH)
+        fun emit(
+            first: Pair<Float, Float>,
+            second: Pair<Float, Float>,
+            third: Pair<Float, Float>,
+            wa: DoubleArray,
+            wb: DoubleArray,
+            wc: DoubleArray,
+        ) {
+            val colour = fieldColour(
+                colours,
+                doubleArrayOf(
+                    (wa[0] + wb[0] + wc[0]) / 3,
+                    (wa[1] + wb[1] + wc[1]) / 3,
+                    (wa[2] + wb[2] + wc[2]) / 3,
+                ),
+            )
+            svg.append("<polygon points=\"${points(first, second, third)}\" fill=\"${css(colour)}\"/>\n")
+        }
+        svg.append("<g shape-rendering=\"crispEdges\"><title>barycentric triangle field sampled on a ${MESH}x$MESH grid (approximation)</title>\n")
+        for (i in 0 until MESH) {
+            for (j in 0 until MESH - i) {
+                emit(point(i, j), point(i + 1, j), point(i, j + 1),
+                    weights(i, j), weights(i + 1, j), weights(i, j + 1))
+                if (i + j < MESH - 1) {
+                    emit(point(i + 1, j), point(i + 1, j + 1), point(i, j + 1),
+                        weights(i + 1, j), weights(i + 1, j + 1), weights(i, j + 1))
+                }
+            }
+        }
+        svg.append("</g>\n")
     }
 
     private fun escape(text: String): String = buildString {
@@ -315,6 +415,9 @@ internal object SvgWriter {
             )
         }
     }
+
+    /** Mesh cells per axis in the diagnostic approximation of an interpolated colour field. */
+    private const val MESH = 6
 
     /** Where the baseline sits inside the box a glyph is given, as a fraction of its size. */
     private const val ASCENT = 0.8f

@@ -18,6 +18,55 @@ import kotlin.test.assertTrue
  */
 class SvgWriterTest {
     @Test
+    fun `quad diagnostic cells cover the rectangle and hide transparent rgb`() {
+        val red = Color(255,0,0,255).rgbaInt
+        val hiddenBlue = Color(0,0,255,0).rgbaInt
+        val words = intArrayOf(Op.QUAD,0f.toBits(),0f.toBits(),24f.toBits(),24f.toBits(),
+            red,hiddenBlue,red,hiddenBlue,Op.NO_ASSET)
+        checkGradientDiagnostic(words,24.0 * 24.0)
+    }
+
+    @Test
+    fun `triangle diagnostic cells cover the triangle and hide transparent rgb`() {
+        val red = Color(255,0,0,255).rgbaInt
+        val words = intArrayOf(Op.TRIANGLES,3,0,Op.NO_ASSET,
+            0f.toBits(),0f.toBits(),24f.toBits(),0f.toBits(),0f.toBits(),24f.toBits(),
+            red,Color(0,0,255,0).rgbaInt,red)
+        checkGradientDiagnostic(words,24.0 * 24.0 / 2)
+    }
+
+    private fun checkGradientDiagnostic(words: IntArray, expectedArea: Double) {
+        val file = File.createTempFile("kotlinmcui-gradient", ".svg")
+        try {
+            SvgWriter.write(words,words.size,32,32,file)
+            val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
+            val polygons = document.getElementsByTagName("polygon")
+            assertTrue(polygons.length > 1)
+            var totalArea = 0.0
+            for(i in 0 until polygons.length) {
+                val polygon = polygons.item(i) as org.w3c.dom.Element
+                assertTrue(polygon.getAttribute("fill").startsWith("rgba(255,0,0,"),
+                    "transparent blue must not colour a red fade")
+                val points = polygon.getAttribute("points").trim().split(Regex("\\s+"))
+                    .map { point -> point.split(',').map(String::toDouble) }
+                var area = 0.0
+                for(j in points.indices) {
+                    val a = points[j]
+                    val b = points[(j + 1) % points.size]
+                    area += a[0] * b[1] - a[1] * b[0]
+                }
+                area = kotlin.math.abs(area) / 2
+                assertTrue(area > 0.0,"a diagnostic cell must not fold into a bow tie")
+                totalArea += area
+            }
+            assertEquals(expectedArea,totalArea,0.1)
+            assertTrue(file.readText().contains("approximation"))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
     fun `a frame becomes well-formed svg with the page's elements in it`() {
         WebTestRuntime.install()
         WebBackend.create("svg-test") { TestColorPage() }.show()

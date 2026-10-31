@@ -453,32 +453,26 @@ function quad(words, at, transform) {
     const image = imageOf(asset);
     // No pixels yet (or no definition): this draw is invisible. A failed load is already a
     // checkerboard image here, so it goes through the same texture path rather than a fill.
-    if (!image) return;
+    if (!drawable(image)) return;
     const u0 = floatOf(words[at + 10]), v0 = floatOf(words[at + 11]);
     const u1 = floatOf(words[at + 12]), v1 = floatOf(words[at + 13]);
     const width = floatOf(words[at + 14]), height = floatOf(words[at + 15]);
     if (!positive(width) || !positive(height)) return;
-    // A quad with one colour on all four corners and UVs that are affine across it is drawn in one
-    // piece. Two clipped triangles composite the shared diagonal twice and leave a seam there; a
-    // single clip cannot. Four unrelated corner colours keep the framework's two-triangle model.
-    if (lt === rt && rt === lb && lb === rb) {
+    const uniform = lt === rt && rt === lb && lb === rb;
+    // A texture with one tint and an affine transform is drawn in one piece: clipping a pattern
+    // cannot show a seam, and under an affine map its sampling stays affine across the fourth
+    // corner. A projective map, or a tint that varies per pixel, goes through the raster field
+    // below instead, because a pattern (and a CanvasGradient) cannot express either correctly.
+    if (uniform && isAffine(transform)) {
       const map = quadMap([[u0, v0], [u1, v0], [u1, v1], [u0, v1]], points, image, width, height);
       if (map) {
         texturedShape(points, image, [lt, rt, rb, lb], map);
         return;
       }
     }
-    // The record's corners are LT, RT, RB, LB; the word order is lt, rt, lb, rb. Draw the two
-    // triangles the game draws, each with its own UVs and per-vertex tint.
-    texturedTriangle(
-      [points[0], points[1], points[3]],
-      [[u0, v0], [u1, v0], [u0, v1]],
-      image, width, height, [lt, rt, lb],
-    );
-    texturedTriangle(
-      [points[1], points[2], points[3]],
-      [[u1, v0], [u1, v1], [u0, v1]],
-      image, width, height, [rt, rb, lb],
+    const rect = [floatOf(words[at + 1]), floatOf(words[at + 2]), floatOf(words[at + 3]), floatOf(words[at + 4])];
+    rasterizeQuad(
+      points, transform, rect, [lt, rt, lb, rb], image, width, height, [u0, v0, u1, v1],
     );
     return;
   }
@@ -486,27 +480,35 @@ function quad(words, at, transform) {
     paintBox(points, css(lt));
     return;
   }
-  // Axis-aligned colour ramps are what the pickers use, and a gradient is exact for those.
-  if (lt === lb && rt === rb) {
+  // The pickers draw two-colour ramps on an axis-aligned rectangle. A CanvasGradient is exact only
+  // there: its level lines are perpendicular to the axis in *device* space, so a shear would skew
+  // the ramp. Equal alpha is what makes the straight stop colours equivalent to the premultiplied
+  // field; a varying alpha is not, because the canvas spec interpolates stops unpremultiplied.
+  //
+  // The outline being axis-aligned is not enough on its own: `axisAligned` only inspects the four
+  // projected corners, so it cannot tell a genuine affine map from a projective one whose bottom
+  // row merely rescales them (a bottom-right-only homography does exactly that). Only an actually
+  // affine transform proves that the field's u is linear in device space and that the gradient's
+  // level lines match the quad's local field.
+  if (lt === lb && rt === rb && (lt & 0xff) === (rt & 0xff) && isAffine(transform) && axisAligned(points)) {
     const gradient = ctx.createLinearGradient(points[0][0], points[0][1], points[1][0], points[1][1]);
     gradient.addColorStop(0, css(lt));
     gradient.addColorStop(1, css(rt));
     paintBox(points, gradient);
     return;
   }
-  if (lt === rt && lb === rb) {
+  if (lt === rt && lb === rb && (lt & 0xff) === (lb & 0xff) && isAffine(transform) && axisAligned(points)) {
     const gradient = ctx.createLinearGradient(points[0][0], points[0][1], points[3][0], points[3][1]);
     gradient.addColorStop(0, css(lt));
     gradient.addColorStop(1, css(lb));
     paintBox(points, gradient);
     return;
   }
-  // Otherwise the two triangles the game's backends draw, for the same reason: four unrelated
-  // corners have no single affine field, and this is the model the framework measured against. Each
-  // triangle is shaded per vertex, so the palette's square ramps along its diagonal instead of
-  // flattening into two blocks.
-  shadeTriangle([points[0], points[1], points[3]], [lt, rt, lb]);
-  shadeTriangle([points[1], points[2], points[3]], [rt, rb, lb]);
+  // Everything else is ONE bilinear field in the quad's original local coordinates. Both triangles
+  // a backend might submit read the same field, so there is no diagonal where two independently
+  // shaded triangles could disagree or composite twice.
+  const rect = [floatOf(words[at + 1]), floatOf(words[at + 2]), floatOf(words[at + 3]), floatOf(words[at + 4])];
+  rasterizeQuad(points, transform, rect, [lt, rt, lb, rb], null, 0, 0, null);
 }
 
 function triangles(words, at, transform) {
@@ -523,42 +525,138 @@ function triangles(words, at, transform) {
       if (!Number.isFinite(floatOf(words[base + part]))) return;
     }
   }
+  const triCount = Math.floor(count / 3);
+  // A triangle list is often a mesh whose triangles share edges. Drawing each triangle through the
+  // uniform fast paths (or through a per-triangle mask) antialiases the shared edge twice, so two
+  // half-covered composites leave a darker seam. The flags let the shared rasteriser give every
+  // shared edge to exactly one triangle, while real overlapping areas still composite in list order.
+  const shared = sharedEdgeFlags(words, verticesAt, stride, triCount);
   if (textured) {
     const image = imageOf(words[at + 3]);
     // Pending, undefined or not-yet-ready: no visible draw. A failed load is the checkerboard.
-    if (!image) return;
+    if (!drawable(image)) return;
     const width = floatOf(words[coloursAt + count]);
     const height = floatOf(words[coloursAt + count + 1]);
     if (!positive(width) || !positive(height)) return;
-    for (let i = 0; i + 2 < count; i += 3) {
+    for (let t = 0; t < triCount; t++) {
+      const i = t * 3;
       const points = [];
       const uvs = [];
+      const local = [];
       for (let step = 0; step < 3; step++) {
         const base = verticesAt + (i + step) * stride;
-        points.push(project(transform, floatOf(words[base]), floatOf(words[base + 1])));
+        const x = floatOf(words[base]), y = floatOf(words[base + 1]);
+        local.push(x, y);
+        points.push(project(transform, x, y));
         uvs.push([floatOf(words[base + 2]), floatOf(words[base + 3])]);
       }
-      texturedTriangle(
-        points, uvs, image, width, height,
-        [words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]],
-      );
+      const colours = [words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]];
+      if (colours[0] === colours[1] && colours[1] === colours[2] && isAffine(transform) &&
+        !hasSharedEdge(shared, i)) {
+        texturedTriangle(points, uvs, image, width, height, colours);
+      } else {
+        rasterizeTriangle(
+          points, transform, local, colours, image, width, height,
+          [uvs[0][0], uvs[0][1], uvs[1][0], uvs[1][1], uvs[2][0], uvs[2][1]], shared, i,
+        );
+      }
     }
     return;
   }
-  for (let i = 0; i + 2 < count; i += 3) {
-    const points = [0, 1, 2].map((step) => {
+  for (let t = 0; t < triCount; t++) {
+    const i = t * 3;
+    const points = [];
+    const local = [];
+    for (let step = 0; step < 3; step++) {
       const base = verticesAt + (i + step) * stride;
-      return project(transform, floatOf(words[base]), floatOf(words[base + 1]));
-    });
+      const x = floatOf(words[base]), y = floatOf(words[base + 1]);
+      local.push(x, y);
+      points.push(project(transform, x, y));
+    }
     const colours = [words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]];
-    if (colours[0] === colours[1] && colours[1] === colours[2]) fill(points, css(colours[0]));
-    else shadeTriangle(points, colours);
+    if (colours[0] === colours[1] && colours[1] === colours[2] && !hasSharedEdge(shared, i)) {
+      fill(points, css(colours[0]));
+    } else {
+      rasterizeTriangle(points, transform, local, colours, null, 0, 0, null, shared, i);
+    }
   }
+}
+
+// Edge ownership for one record. 0 means an outer edge, 1 a shared edge this triangle does not own
+// in the boundary tie, and 2 a shared edge it does own. Reused across draws; only the used prefix
+// is cleared, so a frame with many meshes allocates at most once per maximum size.
+const triangleEdgeOwners = new Map();
+let triangleSharedFlags = new Uint8Array(0);
+
+function hasSharedEdge(flags, at) {
+  return flags[at] !== 0 || flags[at + 1] !== 0 || flags[at + 2] !== 0;
+}
+
+/**
+ * Mark the triangle edges that are shared with another triangle in the same record.
+ *
+ * An edge is a vertex pair, and its key is orientation-free, so a mesh may wind its second
+ * triangle either way. The first triangle to claim an edge owns it; every later triangle that uses
+ * the same edge yields the boundary samples. That is the half-open rule that makes the interior of
+ * a tessellated shape covered exactly once, while triangles that merely overlap (no shared
+ * vertices) keep compositing independently in list order.
+ */
+function sharedEdgeFlags(words, verticesAt, stride, triCount) {
+  const length = triCount * 3;
+  if (triangleSharedFlags.length < length) triangleSharedFlags = new Uint8Array(length);
+  else triangleSharedFlags.fill(0, 0, length);
+  if (triCount < 2) return triangleSharedFlags;
+  triangleEdgeOwners.clear();
+  for (let t = 0; t < triCount; t++) {
+    for (let edge = 0; edge < 3; edge++) {
+      const a = t * 3 + ((edge + 1) % 3);
+      const b = t * 3 + ((edge + 2) % 3);
+      const key = triangleEdgeKey(words, verticesAt, stride, a, b);
+      if (key === null) continue;
+      const own = t * 3 + edge;
+      const first = triangleEdgeOwners.get(key);
+      if (first === undefined) {
+        triangleEdgeOwners.set(key, own);
+      } else {
+        triangleSharedFlags[own] = 1;
+        if (triangleSharedFlags[first] !== 1) triangleSharedFlags[first] = 2;
+      }
+    }
+  }
+  return triangleSharedFlags;
+}
+
+/** An orientation-free key for the local edge between two vertices, or null when unusable. */
+function triangleEdgeKey(words, verticesAt, stride, a, b) {
+  const ax = floatOf(words[verticesAt + a * stride]);
+  const ay = floatOf(words[verticesAt + a * stride + 1]);
+  const bx = floatOf(words[verticesAt + b * stride]);
+  const by = floatOf(words[verticesAt + b * stride + 1]);
+  if (!Number.isFinite(ax) || !Number.isFinite(ay) ||
+    !Number.isFinite(bx) || !Number.isFinite(by)) return null;
+  return ax < bx || (ax === bx && ay <= by)
+    ? ax + ',' + ay + ',' + bx + ',' + by
+    : bx + ',' + by + ',' + ax + ',' + ay;
 }
 
 /** Whether [value] is a per-draw dimension: finite and positive, not merely greater than zero. */
 function positive(value) {
   return Number.isFinite(value) && value > 0;
+}
+
+/**
+ * Whether a cached asset value is something Canvas can actually draw.
+ *
+ * A pending load is null and the cache is only ever supposed to hold an Image or an offscreen
+ * canvas; anything else is a bad asset entry, not a CanvasImageSource. Checking the shape here -
+ * before `drawImage` / `createPattern` sees it - keeps a mistyped entry from surfacing as a
+ * TypeError from inside the painter and turning one bad texture into a broken frame.
+ */
+function drawable(image) {
+  if (image === null || typeof image !== 'object') return false;
+  if (typeof image.getContext === 'function') return positive(image.width) && positive(image.height);
+  return typeof image.naturalWidth === 'number' && typeof image.naturalHeight === 'number' &&
+    positive(image.naturalWidth) && positive(image.naturalHeight);
 }
 
 /** Whether a projected point is something Canvas can place. */
@@ -567,7 +665,7 @@ function finitePoint(point) {
 }
 
 /**
- * Draw one triangle of a texture, modulated by its per-vertex colours.
+ * Draw one triangle of a texture with a uniform tint.
  *
  * The UVs are in the draw's nominal image pixel space, so they are scaled by the pixels actually
  * held: a loaded image of another resolution and the missing-texture checkerboard both preserve the
@@ -579,25 +677,25 @@ function texturedTriangle(points, uvs, image, nominalWidth, nominalHeight, colou
 }
 
 /**
- * Draw one textured polygon, modulated by [colours], onto the screen.
+ * Draw one textured polygon with a UNIFORM tint, composited onto the screen exactly once.
  *
- * The modulation is done on a scratch surface and composited onto the screen exactly once with
- * `source-over`, because the blend modes it needs - `multiply` for the tint, `destination-in` for
- * the alphas - apply to the whole destination. Running them on the screen would multiply or clear
- * whatever the page had already painted underneath the polygon. The scratch claims only the
- * polygon's visible bounds, is reused by every draw, and never grows past the canvas.
+ * A tint that is the same on every vertex needs no interpolated colour field, so the texture can be
+ * the source and the uniform factors can be applied with whole-surface blends on a scratch surface.
+ * The scratch claims only the polygon's visible bounds, is reused by every draw, and never grows
+ * past the canvas. Blending on the scratch instead of the screen is what keeps `multiply` and
+ * `destination-in` from changing whatever the page already painted underneath.
  *
- * The result is the framework's model: RGB is the texture's colour times the interpolated vertex
- * colour, and alpha is the texture's alpha times the interpolated vertex alpha, each applied once.
- * `multiply` is only exact when its destination is opaque - over a translucent backdrop Canvas
- * mixes the backdrop into the result - so the tint starts from an opaque copy of the texture's
- * colour and the real alpha is put back afterwards, instead of multiplying the tint into the
- * texture's own alpha and squaring it.
+ * The result is the contract's source: premultiplied RGB is the texture's premultiplied colour times
+ * the tint's premultiplied colour, and alpha is the texture's alpha times the tint's alpha, each
+ * applied once. `multiply` is only exact when its destination is opaque - over a translucent
+ * backdrop Canvas mixes the backdrop into the product - so the tint starts from an opaque copy of
+ * the texture's colour and the texture's alpha is put back afterwards, instead of multiplying the
+ * tint into the texture's own alpha and squaring it.
  *
  * A polygon with no tint is drawn straight onto the screen with one `source-over`; a white tint is
- * composited from the texture's own alpha without the multiply. Both keep the ordinary cases free
- * of the extra passes. True projective interpolation and the shared diagonal of a quad whose four
- * corners have unrelated colours remain approximated, as the docs record.
+ * composited from the texture's own alpha without the multiply. A varying tint or a projective map
+ * does not come here: it cannot be expressed by a pattern plus whole-surface blends, and is
+ * rasterised by [rasterizeQuad] / [rasterizeTriangle] instead.
  */
 function texturedShape(points, image, colours, map) {
   const width = image.naturalWidth || image.width;
@@ -605,11 +703,12 @@ function texturedShape(points, image, colours, map) {
   if (!positive(width) || !positive(height)) return;
   if (!points.every(finitePoint)) return;
   const uniform = colours.every((colour) => colour === colours[0]);
+  if (!uniform) return;
   const tint = colours[0];
   // A white tint leaves the texture's RGB alone, so the texture itself is the source and neither
   // the tint pass nor the alpha restore is needed.
-  const whiteRgb = colours.every(isWhiteRgb);
-  if (uniform && isWhite(tint)) {
+  const whiteRgb = isWhiteRgb(tint);
+  if (isWhite(tint)) {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -641,33 +740,19 @@ function texturedShape(points, image, colours, map) {
       // The multiply destination, not the tint, has to be opaque for the product to be exact.
       drawTexture(scratch, opaqueSource(image) || image, map, points, dx, dy);
       scratch.globalCompositeOperation = 'multiply';
-      if (uniform) {
-        scratch.setTransform(1, 0, 0, 1, dx, dy);
-        scratch.fillStyle = css(tint | 0xff);
-        scratch.fillRect(left, top, boxWidth, boxHeight);
-      } else {
-        const field = opaqueField(colours);
-        scratch.setTransform(...shifted(unitMap(points), dx, dy));
-        scratch.imageSmoothingEnabled = true;
-        scratch.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
-      }
+      scratch.setTransform(1, 0, 0, 1, dx, dy);
+      scratch.fillStyle = css(tint | 0xff);
+      scratch.fillRect(left, top, boxWidth, boxHeight);
       // Put the texture's alpha back, which the opaque destination above replaced.
       scratch.globalCompositeOperation = 'destination-in';
       drawTexture(scratch, image, map, points, dx, dy);
     }
-    if (colours.some((colour) => (colour & 0xff) !== 0xff)) {
+    if ((tint & 0xff) !== 0xff) {
       // The vertex tint's alpha multiplies the texture's alpha, once.
       scratch.globalCompositeOperation = 'destination-in';
-      if (uniform) {
-        scratch.setTransform(1, 0, 0, 1, dx, dy);
-        scratch.fillStyle = `rgba(255,255,255,${((tint & 0xff) / 255).toFixed(3)})`;
-        scratch.fillRect(left, top, boxWidth, boxHeight);
-      } else {
-        const field = triangleField(colours);
-        scratch.setTransform(...shifted(unitMap(points), dx, dy));
-        scratch.imageSmoothingEnabled = true;
-        scratch.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
-      }
+      scratch.setTransform(1, 0, 0, 1, dx, dy);
+      scratch.fillStyle = `rgba(255,255,255,${((tint & 0xff) / 255).toFixed(3)})`;
+      scratch.fillRect(left, top, boxWidth, boxHeight);
     }
   } finally {
     scratch.restore();
@@ -681,6 +766,441 @@ function texturedShape(points, image, colours, map) {
   } finally {
     ctx.restore();
   }
+}
+
+// ---- one premultiplied field per draw --------------------------------------------------------
+//
+// A quad's four corner colours define ONE bilinear field in the quad's original (untransformed)
+// rectangle, and a triangle's three colours define ONE barycentric field. Both are evaluated with
+// the same rule: normalise the encoded sRGB components and the alpha to 0..1, premultiply each
+// vertex's RGB by its alpha, then interpolate the premultiplied RGB and the alpha in floating point.
+// No intermediate 8-bit quantisation, and no linear-light conversion.
+//
+// The field is rasterised at device-pixel resolution into a reused offscreen surface and composited
+// once with `source-over`. That is what makes the browser path follow a projective transform: the
+// inverse homography recovers the sample's original local coordinate, which is the domain of the
+// field, no matter where the quad was projected. A CanvasGradient could not do this (its level lines
+// are perpendicular to the axis in device space, and the spec interpolates stops unpremultiplied),
+// and two independently shaded triangles could not either (their shared diagonal would be two
+// different planes and two composites).
+
+const gradientCorners = new Float64Array(16);
+
+/** Premultiply four straight corner colours into [gradientCorners]. */
+function loadQuadCorners(colours) {
+  for (let i = 0; i < 4; i++) {
+    const packed = colours[i];
+    const alpha = packed & 0xff;
+    const at = i * 4;
+    gradientCorners[at] = ((packed >>> 24) & 0xff) * alpha / 255;
+    gradientCorners[at + 1] = ((packed >>> 16) & 0xff) * alpha / 255;
+    gradientCorners[at + 2] = ((packed >>> 8) & 0xff) * alpha / 255;
+    gradientCorners[at + 3] = alpha;
+  }
+}
+
+const triangleCorners = new Float64Array(12);
+
+/** Premultiply three straight vertex colours into [triangleCorners]. */
+function loadTriangleCorners(colours) {
+  for (let i = 0; i < 3; i++) {
+    const packed = colours[i];
+    const alpha = packed & 0xff;
+    const at = i * 4;
+    triangleCorners[at] = ((packed >>> 24) & 0xff) * alpha / 255;
+    triangleCorners[at + 1] = ((packed >>> 16) & 0xff) * alpha / 255;
+    triangleCorners[at + 2] = ((packed >>> 8) & 0xff) * alpha / 255;
+    triangleCorners[at + 3] = alpha;
+  }
+}
+
+/** The inverse of a row-major 3x3, or null when it has no usable inverse. */
+function invertMatrix(m) {
+  const a = m[0], b = m[1], c = m[2];
+  const d = m[3], e = m[4], f = m[5];
+  const g = m[6], h = m[7], i = m[8];
+  const A = e * i - f * h, B = c * h - b * i, C = b * f - c * e;
+  const D = f * g - d * i, E = a * i - c * g, F = c * d - a * f;
+  const G = d * h - e * g, H = b * g - a * h, I = a * e - b * d;
+  const determinant = a * A + b * D + c * G;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) return null;
+  return [
+    A / determinant, B / determinant, C / determinant,
+    D / determinant, E / determinant, F / determinant,
+    G / determinant, H / determinant, I / determinant,
+  ];
+}
+
+const localPointStore = new Float64Array(2);
+
+/**
+ * Apply [inverse] to a device point and divide by the resulting w, or null when it is unusable.
+ *
+ * This is the inverse homography: for an affine transform w is 1, and for a valid perspective it is
+ * the positive projective denominator that recovers the point in the draw's own coordinates.
+ */
+function localPoint(inverse, x, y) {
+  const w = inverse[6] * x + inverse[7] * y + inverse[8];
+  if (!Number.isFinite(w) || w === 0) return null;
+  localPointStore[0] = (inverse[0] * x + inverse[1] * y + inverse[2]) / w;
+  localPointStore[1] = (inverse[3] * x + inverse[4] * y + inverse[5]) / w;
+  return Number.isFinite(localPointStore[0]) && Number.isFinite(localPointStore[1])
+    ? localPointStore
+    : null;
+}
+
+/** The texture's pixels as straight RGBA, read once per asset and cached; null when unreadable. */
+const pixelSources = new WeakMap();
+
+function texturePixels(image) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!positive(width) || !positive(height)) return null;
+  const cached = pixelSources.get(image);
+  if (cached && cached.width === width && cached.height === height) return cached;
+  let data = null;
+  try {
+    if (typeof image.getContext === 'function') {
+      data = image.getContext('2d').getImageData(0, 0, width, height).data;
+    } else {
+      const surface = document.createElement('canvas');
+      surface.width = width;
+      surface.height = height;
+      const context = surface.getContext('2d');
+      context.drawImage(image, 0, 0);
+      data = context.getImageData(0, 0, width, height).data;
+    }
+  } catch (error) {
+    // A texture the page cannot read is a security decision, not a reason to throw out of the
+    // frame; the draw is skipped rather than guessed. Any other error is a real bug and escapes.
+    if (!error || error.name !== 'SecurityError') throw error;
+    data = null;
+  }
+  const entry = data === null ? null : { width, height, data };
+  pixelSources.set(image, entry);
+  return entry;
+}
+
+/** The decoded pixels plus the scaling and UV rectangle a textured raster draw samples. */
+function textureField(image, nominalWidth, nominalHeight, uv) {
+  const pixels = texturePixels(image);
+  if (!pixels) return null;
+  return {
+    data: pixels.data,
+    width: pixels.width,
+    height: pixels.height,
+    scaleX: pixels.width / nominalWidth,
+    scaleY: pixels.height / nominalHeight,
+    uv,
+  };
+}
+
+/** The byte offset of the texel at nominal UV (tu,tv), repeating at the image's own period. */
+function texelAt(field, tu, tv) {
+  let x = Math.floor(tu * field.scaleX) % field.width;
+  if (x < 0) x += field.width;
+  let y = Math.floor(tv * field.scaleY) % field.height;
+  if (y < 0) y += field.height;
+  return (y * field.width + x) * 4;
+}
+
+/** Write one source sample, premultiplied, into an ImageData as straight RGBA. */
+function writePremultiplied(data, at, red, green, blue, alpha) {
+  const a = Math.max(0, Math.min(255, Math.round(alpha)));
+  if (a === 0) {
+    data[at] = 0;
+    data[at + 1] = 0;
+    data[at + 2] = 0;
+    data[at + 3] = 0;
+    return;
+  }
+  // Divide by the alpha byte that will actually be stored, so the canvas's own premultiply puts
+  // the colour back where it was instead of accumulating this rounding a second time.
+  const scale = 255 / a;
+  data[at] = Math.max(0, Math.min(255, Math.round(red * scale)));
+  data[at + 1] = Math.max(0, Math.min(255, Math.round(green * scale)));
+  data[at + 2] = Math.max(0, Math.min(255, Math.round(blue * scale)));
+  data[at + 3] = a;
+}
+
+// The field pixels, grown to the largest visible box seen and never past the canvas. Growing on a
+// new maximum is the only allocation; every later draw reuses the same ImageData and writes the
+// sub-rectangle it needs.
+const fieldSurface = { image: null };
+
+function fieldImage(width, height) {
+  let image = fieldSurface.image;
+  if (!image || image.width < width || image.height < height) {
+    image = scratchFor(width, height).createImageData(width, height);
+    fieldSurface.image = image;
+  }
+  return image;
+}
+
+/** Composite the finished field onto the screen once, with the screen's clip still in force. */
+function compositeField(bounds) {
+  const [left, top, right, bottom] = bounds;
+  const width = right - left, height = bottom - top;
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratchSurface.canvas, 0, 0, width, height, left, top, width, height);
+  } finally {
+    ctx.restore();
+  }
+}
+
+/** Clear one row of the field's box so skipped samples cannot reuse a previous draw's pixels. */
+function clearFieldRows(image, width, height) {
+  const data = image.data;
+  for (let row = 0; row < height; row++) {
+    const from = row * image.width * 4;
+    data.fill(0, from, from + width * 4);
+  }
+}
+
+/**
+ * Rasterise one quad's bilinear field, with an optional texture, and composite it once.
+ *
+ * The per-pixel weights are the contract's (1-u)(1-v), u(1-v), (1-u)v and uv, and every pixel is
+ * covered at most once: there is no geometric split, so no diagonal can crease or double-composite.
+ * The texture is sampled in nominal UV space, which is independent of the gradient's local u,v, so
+ * repetition, cropping and negative UVs cannot restart or rescale the colour field.
+ */
+function rasterizeQuad(points, transform, rect, colours, image, nominalWidth, nominalHeight, uv) {
+  const bounds = visibleBounds(points);
+  if (bounds === null) return;
+  const inverse = invertMatrix(transform);
+  if (inverse === null) return;
+  const left = rect[0], top = rect[1];
+  const width = rect[2] - left, height = rect[3] - top;
+  if (!(width > 0) || !(height > 0)) return;
+  const texture = image === null ? null : textureField(image, nominalWidth, nominalHeight, uv);
+  if (image !== null && texture === null) return;
+  loadQuadCorners(colours);
+  const [boxLeft, boxTop, boxRight, boxBottom] = bounds;
+  const boxWidth = boxRight - boxLeft, boxHeight = boxBottom - boxTop;
+  const field = fieldImage(boxWidth, boxHeight);
+  const data = field.data;
+  clearFieldRows(field, boxWidth, boxHeight);
+  for (let y = boxTop; y < boxBottom; y++) {
+    const deviceY = y + 0.5;
+    for (let x = boxLeft; x < boxRight; x++) {
+      const local = localPoint(inverse, x + 0.5, deviceY);
+      if (local === null) continue;
+      const u = (local[0] - left) / width;
+      if (!(u >= 0 && u <= 1)) continue;
+      const v = (local[1] - top) / height;
+      if (!(v >= 0 && v <= 1)) continue;
+      const w0 = (1 - u) * (1 - v), w1 = u * (1 - v);
+      const w2 = (1 - u) * v, w3 = u * v;
+      let red = gradientCorners[0] * w0 + gradientCorners[4] * w1 +
+        gradientCorners[8] * w2 + gradientCorners[12] * w3;
+      let green = gradientCorners[1] * w0 + gradientCorners[5] * w1 +
+        gradientCorners[9] * w2 + gradientCorners[13] * w3;
+      let blue = gradientCorners[2] * w0 + gradientCorners[6] * w1 +
+        gradientCorners[10] * w2 + gradientCorners[14] * w3;
+      let alpha = gradientCorners[3] * w0 + gradientCorners[7] * w1 +
+        gradientCorners[11] * w2 + gradientCorners[15] * w3;
+      if (texture !== null) {
+        const at = texelAt(texture, texture.uv[0] + (texture.uv[2] - texture.uv[0]) * u,
+          texture.uv[1] + (texture.uv[3] - texture.uv[1]) * v);
+        const texelAlpha = texture.data[at + 3] / 255;
+        red = red * (texture.data[at] / 255) * texelAlpha;
+        green = green * (texture.data[at + 1] / 255) * texelAlpha;
+        blue = blue * (texture.data[at + 2] / 255) * texelAlpha;
+        alpha *= texelAlpha;
+      }
+      writePremultiplied(data, ((y - boxTop) * field.width + (x - boxLeft)) * 4,
+        red, green, blue, alpha);
+    }
+  }
+  scratchFor(boxWidth, boxHeight).putImageData(field, 0, 0, 0, 0, boxWidth, boxHeight);
+  compositeField(bounds);
+}
+
+/**
+ * Rasterise one triangle's barycentric field, with an optional texture, and composite it once.
+ *
+ * The weights are computed from the triangle's ORIGINAL local vertices after the device pixel has
+ * been taken back through the inverse homography, so a rotation, shear or perspective cannot move
+ * the colour field relative to the geometry. The texture uses the same barycentric weights on its
+ * nominal UVs.
+ *
+ * Coverage is antialiased against the triangle's projected edges. Edges shared with a sibling
+ * triangle in the same record are not feathered: the record's owner (see [sharedEdgeFlags]) covers
+ * a boundary pixel in full and the other side yields it, so the tessellated interior is composited
+ * exactly once instead of twice at half alpha.
+ */
+const trianglePlanes = new Float64Array(9);
+const triangleEdgeKinds = new Uint8Array(3);
+const coverageSource = new Float64Array(24);
+const coverageTarget = new Float64Array(24);
+
+function rasterizeTriangle(points, transform, local, colours, image, nominalWidth, nominalHeight,
+  uv, shared, sharedAt) {
+  const bounds = visibleBounds(points);
+  if (bounds === null) return;
+  const inverse = invertMatrix(transform);
+  if (inverse === null) return;
+  const x0 = local[0], y0 = local[1];
+  const x1 = local[2], y1 = local[3];
+  const x2 = local[4], y2 = local[5];
+  const denominator = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) return;
+  if (!loadTrianglePlanes(points, shared, sharedAt)) return;
+  const texture = image === null ? null : textureField(image, nominalWidth, nominalHeight, uv);
+  if (image !== null && texture === null) return;
+  loadTriangleCorners(colours);
+  const [boxLeft, boxTop, boxRight, boxBottom] = bounds;
+  const boxWidth = boxRight - boxLeft, boxHeight = boxBottom - boxTop;
+  const field = fieldImage(boxWidth, boxHeight);
+  const data = field.data;
+  clearFieldRows(field, boxWidth, boxHeight);
+  for (let y = boxTop; y < boxBottom; y++) {
+    const deviceY = y + 0.5;
+    for (let x = boxLeft; x < boxRight; x++) {
+      const coverage = triangleCoverage(x, y);
+      if (coverage <= 0) continue;
+      const point = localPoint(inverse, x + 0.5, deviceY);
+      if (point === null) continue;
+      const w0 = ((y1 - y2) * (point[0] - x2) + (x2 - x1) * (point[1] - y2)) / denominator;
+      const w1 = ((y2 - y0) * (point[0] - x2) + (x0 - x2) * (point[1] - y2)) / denominator;
+      const w2 = 1 - w0 - w1;
+      let red = triangleCorners[0] * w0 + triangleCorners[4] * w1 + triangleCorners[8] * w2;
+      let green = triangleCorners[1] * w0 + triangleCorners[5] * w1 + triangleCorners[9] * w2;
+      let blue = triangleCorners[2] * w0 + triangleCorners[6] * w1 + triangleCorners[10] * w2;
+      let alpha = triangleCorners[3] * w0 + triangleCorners[7] * w1 + triangleCorners[11] * w2;
+      if (texture !== null) {
+        const at = texelAt(
+          texture,
+          texture.uv[0] * w0 + texture.uv[2] * w1 + texture.uv[4] * w2,
+          texture.uv[1] * w0 + texture.uv[3] * w1 + texture.uv[5] * w2,
+        );
+        const texelAlpha = texture.data[at + 3] / 255;
+        red = red * (texture.data[at] / 255) * texelAlpha;
+        green = green * (texture.data[at + 1] / 255) * texelAlpha;
+        blue = blue * (texture.data[at + 2] / 255) * texelAlpha;
+        alpha *= texelAlpha;
+      }
+      writePremultiplied(data, ((y - boxTop) * field.width + (x - boxLeft)) * 4,
+        red * coverage, green * coverage, blue * coverage, alpha * coverage);
+    }
+  }
+  scratchFor(boxWidth, boxHeight).putImageData(field, 0, 0, 0, 0, boxWidth, boxHeight);
+  compositeField(bounds);
+}
+
+/**
+ * Build the three inward-facing device-space edge planes for the triangle.
+ *
+ * Every plane gives the signed perpendicular distance in pixels (positive inside), which is what
+ * makes the coverage test independent of the transform: a homography maps straight lines to
+ * straight lines, so the projected triangle's edges are still lines in device space. Shared edges
+ * remember whether this triangle owns their boundary samples.
+ */
+function loadTrianglePlanes(points, shared, sharedAt) {
+  for (let i = 0; i < 3; i++) {
+    const a = points[(i + 1) % 3];
+    const b = points[(i + 2) % 3];
+    const c = points[i];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    if (!(length > 1e-12)) return false;
+    const cross = dx * (c[1] - a[1]) - dy * (c[0] - a[0]);
+    if (!Number.isFinite(cross) || Math.abs(cross) < 1e-12) return false;
+    const scale = (cross > 0 ? 1 : -1) / length;
+    trianglePlanes[i * 3] = -dy * scale;
+    trianglePlanes[i * 3 + 1] = dx * scale;
+    trianglePlanes[i * 3 + 2] = (dy * a[0] - dx * a[1]) * scale;
+    triangleEdgeKinds[i] = shared === null ? 0 : shared[sharedAt + i];
+  }
+  return true;
+}
+
+/**
+ * The fraction of pixel (x,y) this triangle covers, 0 when it cannot contribute.
+ *
+ * Outer edges are clipped against the unit pixel square for antialiasing. A shared edge instead
+ * acts as a whole-pixel ownership test at the centre: one side gets the whole pixel, the other
+ * none, so a tessellated interior is multiplied by alpha once instead of twice.
+ */
+function triangleCoverage(x, y) {
+  const centreX = x + 0.5, centreY = y + 0.5;
+  let nearest = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const distance = trianglePlanes[i * 3] * centreX + trianglePlanes[i * 3 + 1] * centreY +
+      trianglePlanes[i * 3 + 2];
+    const kind = triangleEdgeKinds[i];
+    if (kind !== 0) {
+      if (distance < -1e-6) return 0;
+      if (distance <= 1e-6 && kind === 1) return 0;
+    } else if (distance < nearest) {
+      nearest = distance;
+    }
+  }
+  if (nearest >= 1) return 1;
+  if (nearest <= -1) return 0;
+  return clipSquareCoverage(x, y);
+}
+
+/** The exact area of the unit pixel square that lies inside every outer edge. */
+function clipSquareCoverage(x, y) {
+  let source = coverageSource, target = coverageTarget;
+  let count = 4;
+  source[0] = x; source[1] = y;
+  source[2] = x + 1; source[3] = y;
+  source[4] = x + 1; source[5] = y + 1;
+  source[6] = x; source[7] = y + 1;
+  for (let i = 0; i < 3; i++) {
+    if (triangleEdgeKinds[i] !== 0) continue;
+    count = clipHalfPlane(source, count, i, target);
+    if (count === 0) return 0;
+    const swap = source;
+    source = target;
+    target = swap;
+  }
+  let doubled = 0;
+  for (let i = 0; i < count; i++) {
+    const j = i === 0 ? count - 1 : i - 1;
+    doubled += source[i * 2] * source[j * 2 + 1] - source[j * 2] * source[i * 2 + 1];
+  }
+  const area = Math.abs(doubled) / 2;
+  return area >= 1 ? 1 : area;
+}
+
+/** Clip a convex polygon (interleaved x,y) by one inward half-plane of [trianglePlanes]. */
+function clipHalfPlane(source, count, plane, target) {
+  const nx = trianglePlanes[plane * 3];
+  const ny = trianglePlanes[plane * 3 + 1];
+  const offset = trianglePlanes[plane * 3 + 2];
+  let out = 0;
+  for (let i = 0; i < count; i++) {
+    const j = i === 0 ? count - 1 : i - 1;
+    const xi = source[i * 2], yi = source[i * 2 + 1];
+    const xj = source[j * 2], yj = source[j * 2 + 1];
+    const di = nx * xi + ny * yi + offset;
+    const dj = nx * xj + ny * yj + offset;
+    if (di >= 0) {
+      if (dj < 0) {
+        const t = dj / (dj - di);
+        target[out * 2] = xj + (xi - xj) * t;
+        target[out * 2 + 1] = yj + (yi - yj) * t;
+        out++;
+      }
+      target[out * 2] = xi;
+      target[out * 2 + 1] = yi;
+      out++;
+    } else if (dj >= 0) {
+      const t = dj / (dj - di);
+      target[out * 2] = xj + (xi - xj) * t;
+      target[out * 2 + 1] = yj + (yi - yj) * t;
+      out++;
+    }
+  }
+  return out;
 }
 
 /** The UVs scaled from the draw's nominal size to the pixels actually held. */
@@ -712,11 +1232,6 @@ function quadMap(uv, points, image, nominalWidth, nominalHeight) {
 /** Where [map] sends one UV point. */
 function mapPoint(map, u, v) {
   return [map[0] * u + map[2] * v + map[4], map[1] * u + map[3] * v + map[5]];
-}
-
-/** [map] moved by the scratch surface's origin. */
-function shifted(map, dx, dy) {
-  return [map[0], map[1], map[2], map[3], map[4] + dx, map[5] + dy];
 }
 
 /**
@@ -770,15 +1285,17 @@ function opaqueSource(image) {
   surface.height = height;
   const context = surface.getContext('2d');
   let opaque = null;
+  context.drawImage(image, 0, 0);
   try {
-    context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, width, height);
     const data = pixels.data;
     for (let i = 3; i < data.length; i += 4) data[i] = 255;
     context.putImageData(pixels, 0, 0);
     opaque = surface;
   } catch (error) {
-    opaque = null;
+    // A tainted surface cannot be read; the caller then multiplies over the texture itself, which
+    // keeps the alpha exact. A TypeError here would be a bug in this painter and must not hide.
+    if (!error || error.name !== 'SecurityError') throw error;
   }
   opaqueSources.set(image, { canvas: opaque, width, height });
   return opaque;
@@ -795,12 +1312,7 @@ function patternOf(context, image) {
     patterns.set(image, byContext);
   }
   if (!byContext.has(context)) {
-    let pattern = null;
-    try {
-      pattern = context.createPattern(image, 'repeat');
-    } catch (error) {
-      pattern = null;
-    }
+    const pattern = context.createPattern(image, 'repeat');
     byContext.set(context, pattern || null);
   }
   return byContext.get(context);
@@ -862,15 +1374,6 @@ function textureMap(uv, points) {
   return [a, b, c, d, e, f];
 }
 
-/** The unit square to projected-triangle matrix, used to place the cached colour field. */
-function unitMap(points) {
-  return [
-    points[1][0] - points[0][0], points[1][1] - points[0][1],
-    points[2][0] - points[0][0], points[2][1] - points[0][1],
-    points[0][0], points[0][1],
-  ];
-}
-
 function isWhite(packed) {
   return packed === -1 || packed === 0xffffffff;
 }
@@ -878,107 +1381,6 @@ function isWhite(packed) {
 /** Whether a packed colour has white RGB, whatever its alpha. */
 function isWhiteRgb(packed) {
   return ((packed & 0xffffff00) >>> 0) === 0xffffff00;
-}
-
-/**
- * Fill a triangle with a colour per vertex.
- *
- * Canvas 2D has no interpolating triangle, but an affine colour field *is* a bilinear one when the
- * fourth corner is the one the affine plane implies, so: put the three colours and that fourth into a
- * two-by-two image, map the unit square onto the parallelogram the triangle spans, and clip to the
- * triangle. Bilinear filtering of the tiny image does the interpolation, and one clip plus one draw
- * beats subdividing into a few hundred of them.
- */
-function shadeTriangle(points, colours) {
-  const field = triangleField(colours);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.beginPath();
-  path(ctx, points);
-  ctx.clip();
-  // (0,0) -> first vertex, (1,0) -> second, (0,1) -> third: exactly the affine map of the field.
-  ctx.setTransform(
-    points[1][0] - points[0][0], points[1][1] - points[0][1],
-    points[2][0] - points[0][0], points[2][1] - points[0][1],
-    points[0][0], points[0][1],
-  );
-  ctx.imageSmoothingEnabled = true;
-  // The whole field, not a corner of it: sampling a two-by-two source rectangle out of a sixteen
-  // square drew the colour of one corner and made every palette flat.
-  ctx.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
-  ctx.restore();
-}
-
-const fields = new Map();
-
-/** How finely the affine field is sampled. Two-by-two is exact in theory and banded in practice. */
-const FIELD_SIZE = 16;
-
-/** The colour field of a triangle as a small image, cached by the colours it is built from. */
-function triangleField(colours) {
-  return fieldOf(colours, false);
-}
-
-/**
- * The same field with alpha forced opaque, for use as a `multiply` source.
- *
- * The multiply has to see the tint's colour only: a translucent source would mix the destination
- * into the product, and the vertex alpha is applied by its own `destination-in` pass anyway.
- */
-function opaqueField(colours) {
-  return fieldOf(colours, true);
-}
-
-function fieldOf(colours, opaque) {
-  const key = (opaque ? 'o:' : 'a:') + colours.join(',');
-  const cached = fields.get(key);
-  if (cached) return cached;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = FIELD_SIZE;
-  canvas.height = FIELD_SIZE;
-  const context = canvas.getContext('2d');
-  // The affine plane through the three colours decides the fourth corner of the parallelogram, and
-  // every texel is that plane evaluated where the texel will be sampled from.
-  const c00 = channels(colours[0]);
-  const c10 = channels(colours[1]);
-  const c01 = channels(colours[2]);
-  const c11 = c10.map((value, index) => value + c01[index] - c00[index]);
-  const image = context.createImageData(FIELD_SIZE, FIELD_SIZE);
-  for (let y = 0; y < FIELD_SIZE; y++) {
-    const v = (y + 0.5) / FIELD_SIZE;
-    for (let x = 0; x < FIELD_SIZE; x++) {
-      const u = (x + 0.5) / FIELD_SIZE;
-      const at = (y * FIELD_SIZE + x) * 4;
-      for (let channel = 0; channel < 4; channel++) {
-        if (opaque && channel === 3) {
-          image.data[at + channel] = 255;
-          continue;
-        }
-        const value =
-          c00[channel] * (1 - u) * (1 - v) +
-          c10[channel] * u * (1 - v) +
-          c01[channel] * (1 - u) * v +
-          c11[channel] * u * v;
-        image.data[at + channel] = clamp(value);
-      }
-    }
-  }
-  context.putImageData(image, 0, 0);
-  fields.set(key, canvas);
-  return canvas;
-}
-
-function channels(packed) {
-  return [(packed >>> 24) & 0xff, (packed >>> 16) & 0xff, (packed >>> 8) & 0xff, packed & 0xff];
-}
-
-function pack(channels) {
-  return (channels[0] << 24) | (channels[1] << 16) | (channels[2] << 8) | channels[3];
-}
-
-function clamp(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function text(words, at, transform) {
@@ -1021,18 +1423,6 @@ function item(words, at, transform) {
 function box(words, at, transform, colour) {
   const points = corners(words, at + 1, transform);
   if (points) paintBox(points, colour);
-}
-
-function average(colours) {
-  let r = 0, g = 0, b = 0, a = 0;
-  for (const packed of colours) {
-    r += (packed >>> 24) & 0xff;
-    g += (packed >>> 16) & 0xff;
-    b += (packed >>> 8) & 0xff;
-    a += packed & 0xff;
-  }
-  const n = colours.length;
-  return (((r / n) & 0xff) << 24) | (((g / n) & 0xff) << 16) | (((b / n) & 0xff) << 8) | ((a / n) & 0xff);
 }
 
 // ---- input -----------------------------------------------------------------------------------
