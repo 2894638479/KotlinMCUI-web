@@ -350,14 +350,21 @@ function paint() {
       case Op.DEFAULT_BACKGROUND: box(words, at, transform, '#1d1a16'); break;
       case Op.ITEM: item(words, at, transform); break;
       case Op.CLIP_PUSH: {
-        const rect = corners(words, at + 1, transform);
-        if (rect) {
-          ctx.save();
-          ctx.beginPath();
-          path(ctx, rect);
-          ctx.clip();
-          clips++;
-        }
+        // Every push must have exactly one save and one later restore. CLIP_POP is unconditional,
+        // so a push that skipped its save would let the pop restore the clip outside this scope, and
+        // a push that skipped its clip would silently reuse the previous draw's clip. An invalid or
+        // empty rectangle becomes an explicit empty path, which clips everything out; the block's
+        // records still replay, they just have no coverage.
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        // Canvas paths are in device space once their segments are added and ctx.save does not keep
+        // the current path, so start a new one here. That also stops a clip from inheriting any
+        // path a previous record happened to leave behind.
+        ctx.beginPath();
+        const shape = clipCorners(words, at + 1, transform);
+        if (shape) path(ctx, shape);
+        ctx.clip();
+        clips++;
         break;
       }
       case Op.CLIP_POP:
@@ -375,7 +382,44 @@ function paint() {
     }
     at += strideAt(words, at);
   }
-  while (clips-- > 0) ctx.restore();
+  while (clips > 0) { ctx.restore(); clips--; }
+}
+
+/**
+ * The projected corners of a clip rectangle, or null when the clip must be empty.
+ *
+ * A usable clip needs four finite edges with a strictly positive extent, a current transform that is
+ * finite and invertible, and all four corners in front of the eye (w > 0). Anything else fails
+ * closed: the caller turns null into an empty path rather than skipping the clip. The corners are
+ * the exact projected quadrilateral; no bounding box is substituted, because a rotated or
+ * perspective clip is not its axis-aligned bounds.
+ */
+function clipCorners(words, at, transform) {
+  const left = floatOf(words[at]), top = floatOf(words[at + 1]);
+  const right = floatOf(words[at + 2]), bottom = floatOf(words[at + 3]);
+  if (![left, top, right, bottom].every(Number.isFinite)) return null;
+  if (!(right > left) || !(bottom > top)) return null;
+  if (!invertible(transform)) return null;
+  const points = [
+    projectPositive(transform, left, top), projectPositive(transform, right, top),
+    projectPositive(transform, right, bottom), projectPositive(transform, left, bottom),
+  ];
+  return points.every((point) => point !== null) ? points : null;
+}
+
+/** Whether every entry is finite and the matrix has an inverse with a usable determinant. */
+function invertible(m) {
+  for (const value of m) if (!Number.isFinite(value)) return false;
+  return invertMatrix(m) !== null;
+}
+
+/** Project one point, requiring a finite positive w; null when the eye plane is crossed. */
+function projectPositive(m, x, y) {
+  const w = m[6] * x + m[7] * y + m[8];
+  if (!Number.isFinite(w) || !(w > 0)) return null;
+  const px = (m[0] * x + m[1] * y + m[2]) / w;
+  const py = (m[3] * x + m[4] * y + m[5]) / w;
+  return Number.isFinite(px) && Number.isFinite(py) ? [px, py] : null;
 }
 
 function corners(words, at, transform) {
@@ -823,12 +867,13 @@ function invertMatrix(m) {
   const D = f * g - d * i, E = a * i - c * g, F = c * d - a * f;
   const G = d * h - e * g, H = b * g - a * h, I = a * e - b * d;
   const determinant = a * A + b * D + c * G;
-  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) return null;
-  return [
+  if (!Number.isFinite(determinant) || determinant === 0) return null;
+  const inverse = [
     A / determinant, B / determinant, C / determinant,
     D / determinant, E / determinant, F / determinant,
     G / determinant, H / determinant, I / determinant,
   ];
+  return inverse.every(Number.isFinite) ? inverse : null;
 }
 
 const localPointStore = new Float64Array(2);

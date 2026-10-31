@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CLIP-PENDING</title>
+<style>html,body{margin:0;padding:0;background:transparent}canvas{display:block}</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<div id="status"></div>
+<pre id="result"></pre>
+<script>
+  // A portable acceptance page: it loads the SHIPPED client.js and drives it through the same
+  // binary message path the browser uses. Only the socket is a stub; there is no server and no
+  // network. The canvas, 2D context, image decoding and pixel reads are the real browser's.
+  class FixtureSocket {
+    static OPEN = 1;
+    static CLOSED = 3;
+    constructor() {
+      this.readyState = FixtureSocket.OPEN;
+      this.binaryType = '';
+      this.sent = [];
+    }
+    send(value) { this.sent.push(value); }
+    close() { this.readyState = FixtureSocket.CLOSED; }
+  }
+  window.WebSocket = FixtureSocket;
+  // The client normally paces itself from the display's refresh; this page drives paint() directly.
+  window.requestAnimationFrame = () => 0;
+  window.devicePixelRatio = 1;
+</script>
+<script src="../../main/resources/web/client.js"></script>
+<script src="clip-acceptance.js"></script>
+</body>
+</html>

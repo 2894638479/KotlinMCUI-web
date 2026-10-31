@@ -15,7 +15,8 @@ import java.util.Locale
  * a perspective in the frame comes out as the trapezoid it is. Clips are emitted as real `<clipPath>`
  * polygons for the same reason: a rotated or projected clip is a quadrilateral, and SVG clips to
  * shapes, not to axis-aligned rectangles - which is exactly the freedom the Minecraft backends do not
- * have.
+ * have. A clip the client would treat as empty (unmeasured, nonfinite, reversed, singular transform,
+ * eye-plane crossing) becomes an empty clip path here too, never an unclipped fallback.
  *
  * This writer is a DIAGNOSTIC, not a renderer. It has no texture server and no pixels, so textured
  * records are checkerboard polygons carrying their asset id, geometry and nominal size; that checker is a
@@ -59,17 +60,20 @@ internal object SvgWriter {
                 Op.DEFAULT_BACKGROUND -> box(svg, frame, at, transform, "#1d1a16", "background")
                 Op.ITEM -> item(svg, frame, at, transform)
                 Op.CLIP_PUSH -> {
-                    if (bounds(frame, at + 1)?.let { rect ->
-                            val corners = corners(rect, transform)
-                            val id = "clip${clips.size}"
-                            svg.append("<clipPath id=\"$id\"><polygon points=\"${rectPoints(corners)}\"/></clipPath>\n")
-                            svg.append("<g clip-path=\"url(#$id)\">\n")
-                            true
-                        } ?: false
-                    ) {
-                        clips += ""
-                        openClips += 1
+                    // One group per push, whatever the rectangle is, so the matching CLIP_POP always
+                    // closes the group it opened. An unusable clip becomes an empty clipPath rather
+                    // than being skipped: an unclipped diagnostic would show content the browser
+                    // does not, which is the one thing a diagnostic must never do.
+                    val id = "clip${clips.size}"
+                    val cornerList = clipCorners(frame, at, transform)
+                    if (cornerList != null) {
+                        svg.append("<clipPath id=\"$id\"><polygon points=\"${points(cornerList)}\"/></clipPath>\n")
+                    } else {
+                        svg.append("<clipPath id=\"$id\"><polygon points=\"0,0 0,0 0,0\"/></clipPath>\n")
                     }
+                    svg.append("<g clip-path=\"url(#$id)\">\n")
+                    clips += id
+                    openClips += 1
                 }
                 Op.CLIP_POP -> if (openClips > 0) {
                     svg.append("</g>\n")
@@ -241,6 +245,27 @@ internal object SvgWriter {
         return out
     }
 
+    /**
+     * A clip's projected quadrilateral in perimeter order, or null when the clip is empty.
+     *
+     * The same rule the client applies: the four edges must be finite with a strictly positive
+     * extent, the transform must be finite and invertible, and every corner must stay in front of
+     * the eye. A null result is written as an empty clip, never as no clip at all.
+     */
+    private fun clipCorners(frame: IntArray, at: Int, transform: Matrix): List<Pair<Float, Float>>? {
+        val rect = bounds(frame, at + 1) ?: return null
+        if (!rect.all { it.isFinite() }) return null
+        if (!(rect[2] > rect[0]) || !(rect[3] > rect[1])) return null
+        if (!transform.isInvertible()) return null
+        val corners = listOf(
+            rect[0] to rect[1],
+            rect[2] to rect[1],
+            rect[2] to rect[3],
+            rect[0] to rect[3],
+        )
+        return corners.map { (x, y) -> transform.projectPositive(x, y) ?: return null }
+    }
+
     /** left, top, right, bottom in the record order, projected to screen space. */
     private fun corners(rect: FloatArray, transform: Matrix): List<Pair<Float, Float>> = listOf(
         transform.project(rect[0], rect[1]),
@@ -405,6 +430,32 @@ internal object SvgWriter {
             val px = m00 * x + m01 * y + m02
             val py = m10 * x + m11 * y + m12
             return if (w == 0f) px to py else px / w to py / w
+        }
+
+        /** Whether every entry is finite and the matrix has a non-degenerate determinant. */
+        fun isInvertible(): Boolean {
+            if (!(m00.isFinite() && m01.isFinite() && m02.isFinite() &&
+                    m10.isFinite() && m11.isFinite() && m12.isFinite() &&
+                    m20.isFinite() && m21.isFinite() && m22.isFinite())
+            ) {
+                return false
+            }
+            val determinant = m00.toDouble() * (m11.toDouble() * m22 - m12.toDouble() * m21) +
+                m01.toDouble() * (m12.toDouble() * m20 - m10.toDouble() * m22) +
+                m02.toDouble() * (m10.toDouble() * m21 - m11.toDouble() * m20)
+            return determinant.isFinite() && determinant != 0.0
+        }
+
+        /** Project one point, requiring a finite positive w; null when the eye plane is crossed. */
+        fun projectPositive(x: Float, y: Float): Pair<Float, Float>? {
+            val w = m20 * x + m21 * y + m22
+            if (!w.isFinite() || w <= 0f) return null
+            val px = m00 * x + m01 * y + m02
+            val py = m10 * x + m11 * y + m12
+            if (!px.isFinite() || !py.isFinite()) return null
+            val dx = px / w
+            val dy = py / w
+            return if (dx.isFinite() && dy.isFinite()) dx to dy else null
         }
 
         companion object {

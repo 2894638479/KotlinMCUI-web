@@ -22,10 +22,19 @@ import io.github.u2894638479.kotlinmcui.text.DslRenderableChar
  * count, compare with the previous frame and turn into SVG.
  *
  * ### What it deliberately does not do
- * No batching, so a scope change needs no [flush]; the framework's own frame-end flush is recorded
- * as [Op.FLUSH] and means "the frame ends here" to the client. No intersection of nested clips and
- * no composition of nested transforms: both are replayed in order by the client, which keeps its own
- * stacks, so doing the arithmetic twice would only be a second place to get it wrong.
+ * No batching, so a scope change needs no [flush]; the backend's private frame-end flush is recorded
+ * as [Op.FLUSH] and means "the frame ends here" to the client. No composition of nested transforms:
+ * those are replayed in order by the client, which keeps its own stack, so doing the arithmetic twice
+ * would only be a second place to get it wrong. A clip is recorded in the local coordinates the call
+ * received; the client projects its four corners through the transform in force when it replays the
+ * push and intersects the resulting quadrilateral with the clip it already has.
+ *
+ * ### Clip scopes
+ * A clip scope is always one [Op.CLIP_PUSH] and one [Op.CLIP_POP], whatever its rectangle is: an
+ * unmeasured, nonfinite, empty or reversed rectangle is recorded as an explicit zero-area sentinel
+ * and draws nothing inside the block. The block still runs exactly once, because it may have side
+ * effects, and the `finally` closes the scope even when it throws. That keeps every push/pop pair
+ * balanced, so a client replaying the frame can never lose the surrounding clip.
  *
  * ### Primitive input
  * The recorder implements all four typed primitive entry points (colour-only and textured quads,
@@ -200,16 +209,31 @@ internal object Recorder : DslRootRenderer<Unit> {
 
     context(renderParam: Unit)
     override fun withScissor(rect: Rect, block: () -> Unit) {
-        if (!rawCoords(rect)) {
-            block()
-            return
-        }
+        // The rectangle is borrowed for the duration of the call and may be a mutable
+        // implementation: copy every edge before the block can rewrite it. A rectangle that is
+        // unmeasured, nonfinite, empty or reversed is still a scope, but an empty one, recorded as
+        // the zero-area sentinel so the format never has to guess what "empty" means.
+        val measured = putMeasure(rect.left, raw, 0) &&
+            putMeasure(rect.top, raw, 1) &&
+            putMeasure(rect.right, raw, 2) &&
+            putMeasure(rect.bottom, raw, 3)
+        val drawable = measured &&
+            Float.fromBits(raw[2]) > Float.fromBits(raw[0]) &&
+            Float.fromBits(raw[3]) > Float.fromBits(raw[1])
         put(Op.CLIP_PUSH)
-        put(raw[0]); put(raw[1]); put(raw[2]); put(raw[3])
+        if (drawable) {
+            put(raw[0]); put(raw[1]); put(raw[2]); put(raw[3])
+        } else {
+            put(0); put(0); put(0); put(0)
+        }
         counts[Op.CLIP_PUSH]++
-        block()
-        put(Op.CLIP_POP)
-        counts[Op.CLIP_POP]++
+        try {
+            block()
+        } finally {
+            // Balanced even when the block throws: replaying the frame must not leave a clip open.
+            put(Op.CLIP_POP)
+            counts[Op.CLIP_POP]++
+        }
     }
 
     context(renderParam: Unit)
@@ -219,9 +243,13 @@ internal object Recorder : DslRootRenderer<Unit> {
         put(transform.m10.toRawBits()); put(transform.m11.toRawBits()); put(transform.m12.toRawBits())
         put(transform.m20.toRawBits()); put(transform.m21.toRawBits()); put(transform.m22.toRawBits())
         counts[Op.TRANSFORM_PUSH]++
-        block()
-        put(Op.TRANSFORM_POP)
-        counts[Op.TRANSFORM_POP]++
+        try {
+            block()
+        } finally {
+            // Balanced even when the block throws, for the same reason as withScissor.
+            put(Op.TRANSFORM_POP)
+            counts[Op.TRANSFORM_POP]++
+        }
     }
 
     /**

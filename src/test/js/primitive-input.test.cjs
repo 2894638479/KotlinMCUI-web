@@ -11,8 +11,11 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { pathToFileURL } = require('node:url');
 const vm = require('node:vm');
 
 const SOURCE = fs.readFileSync(
@@ -320,7 +323,25 @@ class FakeContext {
   }
 
   stroke() { this.state.ops.push({ op: 'stroke' }); }
-  fillText() {}
+
+  fillText(text, x, y) {
+    this.state.ops.push({
+      op: 'fillText',
+      text,
+      x,
+      y,
+      style: this.fillStyle,
+      transform: this.transform.slice(),
+    });
+    // The model has no font rasteriser, so a glyph is a deterministic filled box in the same place
+    // the painter places it. That is enough to check that clip coverage reaches text (and that a
+    // clipped glyph leaves nothing outside the clip); it is not a claim about glyph shape.
+    const size = /([0-9.]+)px/.exec(this.font);
+    const pixels = size ? Number(size[1]) : 10;
+    const width = Math.max(1, text.length * pixels * 0.6);
+    const height = Math.max(1, pixels * 0.8);
+    this.paint([x, y - height, x + width, y], false);
+  }
 
   drawImage(source, ...args) {
     // CanvasImageSource is a closed set; passing anything else is a TypeError in a browser, and a
@@ -589,6 +610,28 @@ function transformPushFrame(m) {
 
 const TRANSFORM_POP_FRAME = new Int32Array([6]);
 
+/** A text record: one glyph, its position, style, colour and effect box. */
+function textFrame({ code = 0x2588, x = 20, y = 20, size = 20, colour = -1, style = 0 } = {}) {
+  return new Int32Array([
+    7, code, bits(x), bits(y), style, colour,
+    bits(x), bits(x + size * 0.6), bits(size),
+  ]);
+}
+
+/** A widget background record (`BUTTON`, `SLOT`, ...): five geometry words and no payload. */
+function rectOnlyFrame(op, rect = [0, 0, 200, 100], flags = 0, colour = -1) {
+  const words = [op, bits(rect[0]), bits(rect[1]), bits(rect[2]), bits(rect[3])];
+  if (op === 8) words.push(flags, colour);
+  return new Int32Array(words);
+}
+
+/** An item record: geometry, asset, count, damage and flags. */
+function itemFrame({ rect = [0, 0, 200, 100], asset = 0, count = 1, damage = 0, flags = 0 } = {}) {
+  return new Int32Array([
+    13, bits(rect[0]), bits(rect[1]), bits(rect[2]), bits(rect[3]), asset, count, damage, flags,
+  ]);
+}
+
 /** An untextured triangle record: three xy vertices, then three colours. */
 function colourTriangleFrame({
   points = [[0, 0], [80, 0], [0, 40]], colours = [-1, -1, -1],
@@ -716,6 +759,60 @@ function projectPoint(transform, x, y) {
     (transform[0] * x + transform[1] * y + transform[2]) / w,
     (transform[3] * x + transform[4] * y + transform[5]) / w,
   ];
+}
+
+/** Row-major 3x3 composition, the same order the painter uses: `a * b`, b applies first. */
+function multiplyMatrix(a, b) {
+  const out = new Array(9);
+  for (let row = 0; row < 3; row++) {
+    for (let column = 0; column < 3; column++) {
+      out[row * 3 + column] =
+        a[row * 3] * b[column] + a[row * 3 + 1] * b[3 + column] + a[row * 3 + 2] * b[6 + column];
+    }
+  }
+  return out;
+}
+
+/** Rotation around (cx,cy), the same transform the framework's rotate factory builds. */
+function rotationAround(cx, cy, radians) {
+  const c = Math.cos(radians), s = Math.sin(radians);
+  return [c, -s, cx - c * cx + s * cy, s, c, cy - s * cx - c * cy, 0, 0, 1];
+}
+
+/** The projected quad of a local rectangle, as an independent reference polygon. */
+function projectedRect(transform, rect) {
+  return [
+    projectPoint(transform, rect[0], rect[1]),
+    projectPoint(transform, rect[2], rect[1]),
+    projectPoint(transform, rect[2], rect[3]),
+    projectPoint(transform, rect[0], rect[3]),
+  ];
+}
+
+function distanceToSegment(x, y, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const length = dx * dx + dy * dy;
+  let t = length > 0 ? ((x - a[0]) * dx + (y - a[1]) * dy) / length : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(x - (a[0] + t * dx), y - (a[1] + t * dy));
+}
+
+function distanceToPolygon(polygon, x, y) {
+  let distance = Infinity;
+  for (let i = 0; i < polygon.length; i++) {
+    distance = Math.min(distance, distanceToSegment(x, y, polygon[i], polygon[(i + 1) % polygon.length]));
+  }
+  return distance;
+}
+
+/** A sample comfortably inside [polygon]: inside and farther than [margin] from every edge. */
+function wellInside(polygon, x, y, margin = 3) {
+  return inside(polygon, x, y) && distanceToPolygon(polygon, x, y) > margin;
+}
+
+/** A sample comfortably outside [polygon]: outside and farther than [margin] from every edge. */
+function wellOutside(polygon, x, y, margin = 3) {
+  return !inside(polygon, x, y) && distanceToPolygon(polygon, x, y) > margin;
 }
 
 /** Barycentric weights of a device pixel in a triangle's LOCAL vertices. */
@@ -1639,4 +1736,407 @@ test('a non-affine transform with an axis-aligned outline skips the linear ramp 
   const vertical = localCoordinate(transform, 10, 15);
   const v = (vertical[1] - rect[1]) / (rect[3] - rect[1]);
   assertPremultiplied(screen.pixel(10, 15), [255 * (1 - v), 0, 255 * v, 255], 'vertical field');
+});
+
+// ---- clip scopes -----------------------------------------------------------------------------
+//
+// The client's clip is the native Canvas clip, so these tests check the exact projected polygon and
+// the push/pop bookkeeping rather than any clip arithmetic of their own. The reference samples come
+// from the test's own matrix product and point-in-polygon test.
+
+const CLIP_RED = rgba(255, 0, 0);
+const CLIP_GREEN = rgba(0, 255, 0);
+const CLIP_BLUE = rgba(0, 0, 255);
+
+test('an invalid scissor consumes its push and restores the parent clip instead of stealing it', () => {
+  const { api, state, screen } = createClient();
+  api.reset(state);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 40, 40]),
+    clipPushFrame([Number.NaN, 0, 40, 40]),
+    colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+    CLIP_POP_FRAME,
+    colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_GREEN, CLIP_GREEN, CLIP_GREEN, CLIP_GREEN] }),
+    CLIP_POP_FRAME,
+    colourQuadFrame({ rect: [80, 80, 100, 100], colours: [CLIP_BLUE, CLIP_BLUE, CLIP_BLUE, CLIP_BLUE] }),
+  ));
+  api.paint();
+
+  assertPixel(screen.pixel(20, 20), [0, 255, 0, 255],
+    'the draw under an invalid clip was visible, or the parent clip did not survive the pop');
+  assertPixel(screen.pixel(50, 20), [0, 0, 0, 0],
+    'the invalid pop restored one clip too far: the parent scissor was lost');
+  assertPixel(screen.pixel(85, 85), [0, 0, 255, 255],
+    'the draw after the outer pop is not unclipped');
+});
+
+test('a rotated scissor is the projected diamond, not its bounding box', () => {
+  const { api, state, screen } = createClient();
+  api.reset(state);
+  const transform = [
+    Math.SQRT1_2, -Math.SQRT1_2, 100,
+    Math.SQRT1_2, Math.SQRT1_2, 100,
+    0, 0, 1,
+  ];
+  // A local square around (100,100) becomes a diamond with vertices at 100±42.43. The inner
+  // transform is pushed and popped inside the clip scope: it must not move the device-space clip.
+  api.setFrame(frameOf(
+    transformPushFrame(transform),
+    clipPushFrame([-30, -30, 30, 30]),
+    transformPushFrame([1, 0, 200, 0, 1, 200, 0, 0, 1]),
+    TRANSFORM_POP_FRAME,
+    TRANSFORM_POP_FRAME,
+    colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+
+  assertPixel(screen.pixel(100, 100), [255, 0, 0, 255], 'the diamond centre');
+  assertPixel(screen.pixel(100, 65), [255, 0, 0, 255], 'a point inside the diamond near its top vertex');
+  assertPixel(screen.pixel(60, 60), [0, 0, 0, 0],
+    'a bounding-box corner outside the diamond was painted');
+  assertPixel(screen.pixel(100, 50), [0, 0, 0, 0], 'a point outside the top vertex was painted');
+});
+
+test('nested projective-affine and affine-projective clips use each entry transform', () => {
+  const cases = [
+    ['projective parent, affine child',
+      [1, 0.08, 20, 0.04, 1, 15, 0.002, 0.001, 1],
+      rotationAround(100, 100, 0.35)],
+    ['affine parent, projective child',
+      rotationAround(100, 100, -0.3),
+      [0.98, 0.12, 12, -0.08, 0.97, 18, 0.0015, 0.0008, 1]],
+  ];
+  const parentRect = [40, 40, 160, 160];
+  const childRect = [60, 60, 140, 140];
+
+  for (const [name, parent, child] of cases) {
+    const { api, state, screen } = createClient();
+    api.reset(state);
+    api.setFrame(frameOf(
+      transformPushFrame(parent),
+      clipPushFrame(parentRect),
+      transformPushFrame(child),
+      clipPushFrame(childRect),
+      TRANSFORM_POP_FRAME,
+      TRANSFORM_POP_FRAME,
+      colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+      CLIP_POP_FRAME,
+      CLIP_POP_FRAME,
+    ));
+    api.paint();
+
+    const parentPolygon = projectedRect(parent, parentRect);
+    const childPolygon = projectedRect(multiplyMatrix(parent, child), childRect);
+    let checkedInside = 0;
+    let checkedOutside = 0;
+    for (let y = 2; y < 200; y += 5) {
+      for (let x = 2; x < 200; x += 5) {
+        const px = x + 0.5, py = y + 0.5;
+        const painted = screen.pixel(x, y)[3] > 200;
+        if (wellInside(parentPolygon, px, py) && wellInside(childPolygon, px, py)) {
+          assert.ok(painted, `${name}: a sample well inside both clips was not painted at (${x},${y})`);
+          checkedInside++;
+        } else if (wellOutside(parentPolygon, px, py) || wellOutside(childPolygon, px, py)) {
+          assert.ok(!painted, `${name}: a sample well outside a clip was painted at (${x},${y})`);
+          checkedOutside++;
+        }
+      }
+    }
+    assert.ok(checkedInside > 5, `${name}: no well-inside samples were checked`);
+    assert.ok(checkedOutside > 5, `${name}: no well-outside samples were checked`);
+  }
+});
+
+test('invertible clips survive homogeneous rescaling and tiny affine scales', () => {
+  const cases = [
+    [[1e-5, 0, 0, 0, 1e-5, 0, 0, 0, 1e-5], [10, 10, 60, 60], [0, 0, 90, 90]],
+    [[1e20, 0, 0, 0, 1e20, 0, 0, 0, 1e20], [10, 10, 60, 60], [0, 0, 90, 90]],
+    [[1e-7, 0, 0, 0, 1e-7, 0, 0, 0, 1], [1e8, 1e8, 6e8, 6e8], [0, 0, 9e8, 9e8]],
+  ];
+  for (const [matrix, clip, rect] of cases) {
+    const { api, state, screen } = createClient();
+    api.reset(state);
+    api.setFrame(frameOf(transformPushFrame(matrix), clipPushFrame(clip),
+      colourQuadFrame({ rect, colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+      CLIP_POP_FRAME, TRANSFORM_POP_FRAME));
+    api.paint();
+    assertPixel(screen.pixel(30, 30), [255, 0, 0, 255], 'a valid scale must not turn the clip empty');
+    assertPixel(screen.pixel(70, 70), [0, 0, 0, 0], 'the exact clip still excludes its exterior');
+  }
+});
+
+test('disjoint and invalid nested clips suppress coverage and recover after each pop', () => {
+  const inners = [
+    ['disjoint', [100, 100, 150, 150]],
+    ['unmeasured', [Number.NaN, 100, 150, 150]],
+  ];
+  for (const [name, inner] of inners) {
+    const { api, state, screen } = createClient();
+    api.reset(state);
+    api.setFrame(frameOf(
+      clipPushFrame([10, 10, 50, 50]),
+      clipPushFrame(inner),
+      colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+      CLIP_POP_FRAME,
+      colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_GREEN, CLIP_GREEN, CLIP_GREEN, CLIP_GREEN] }),
+      CLIP_POP_FRAME,
+      colourQuadFrame({ rect: [60, 60, 80, 80], colours: [CLIP_BLUE, CLIP_BLUE, CLIP_BLUE, CLIP_BLUE] }),
+    ));
+    api.paint();
+
+    assertPixel(screen.pixel(30, 30), [0, 255, 0, 255], `${name}: the outer clip did not recover after the pop`);
+    assertPixel(screen.pixel(120, 120), [0, 0, 0, 0], `${name}: the disjoint inner clip let a draw through`);
+    assertPixel(screen.pixel(70, 70), [0, 0, 255, 255], `${name}: the draw after the outer pop is clipped`);
+    assertPixel(screen.pixel(5, 5), [0, 0, 0, 0], `${name}: a pixel outside every clip was painted`);
+  }
+});
+
+test('empty, nonfinite and degenerate clip rectangles fail closed', () => {
+  const rectangles = [
+    ['NaN edge', [Number.NaN, 0, 40, 40]],
+    ['infinite edge', [0, 0, Number.POSITIVE_INFINITY, 40]],
+    ['zero width', [10, 0, 10, 40]],
+    ['negative width', [40, 0, 10, 40]],
+    ['zero height', [0, 10, 40, 10]],
+    ['negative height', [0, 40, 40, 10]],
+  ];
+  for (const [name, rect] of rectangles) {
+    const { api, state, screen } = createClient();
+    api.reset(state);
+    api.setFrame(frameOf(
+      clipPushFrame(rect),
+      colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+      CLIP_POP_FRAME,
+    ));
+    api.paint();
+    assertPixel(screen.pixel(20, 20), [0, 0, 0, 0], `${name}: an invalid clip painted inside`);
+    assertPixel(screen.pixel(5, 5), [0, 0, 0, 0], `${name}: an invalid clip painted outside`);
+  }
+});
+
+test('a singular, nonfinite or eye-plane-crossing transform makes the clip empty', () => {
+  const transforms = [
+    ['singular scale', [0, 0, 0, 0, 1, 0, 0, 0, 1], [-100, -100, 100, 100]],
+    ['zero bottom right', [1, 0, 0, 0, 1, 0, 0, 0, 0], [-100, -100, 100, 100]],
+    ['nonfinite', [Number.NaN, 0, 0, 0, 1, 0, 0, 0, 1], [-100, -100, 100, 100]],
+    ['eye plane', [1, 0, 0, 0, 1, 0, 0.1, 0, 1], [-100, -100, 100, 100]],
+    ['zero w corner', [1, 0, 0, 0, 1, 0, 0.1, 0, 1], [-10, -100, 100, 100]],
+  ];
+  for (const [name, transform, rect] of transforms) {
+    const { api, state, screen } = createClient();
+    api.reset(state);
+    api.setFrame(frameOf(
+      transformPushFrame(transform),
+      clipPushFrame(rect),
+      TRANSFORM_POP_FRAME,
+      colourQuadFrame({ rect: [0, 0, 200, 200], colours: [CLIP_RED, CLIP_RED, CLIP_RED, CLIP_RED] }),
+      CLIP_POP_FRAME,
+    ));
+    api.paint();
+    assertPixel(screen.pixel(20, 20), [0, 0, 0, 0], `${name}: an unusable transform produced a usable clip`);
+  }
+});
+
+test('a clip limits text, triangles and the widget/item stand-ins without moving the clip', () => {
+  const { api, state, screen } = createClient();
+  api.reset(state);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 26, 48]),
+    textFrame({ code: 0x2588, x: 20, y: 20, size: 20, colour: CLIP_RED }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  assertPixel(screen.pixel(22, 25), [255, 0, 0, 255], 'text inside the clip was not painted');
+  assertPixel(screen.pixel(30, 25), [0, 0, 0, 0], 'text glyph coverage escaped the clip');
+
+  api.reset(state);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 50, 50]),
+    colourTriangleFrame({ points: [[0, 0], [100, 0], [0, 100]], colours: [CLIP_RED, CLIP_RED, CLIP_RED] }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  assertPixel(screen.pixel(10, 10), [255, 0, 0, 255], 'triangle inside the clip was not painted');
+  assertPixel(screen.pixel(70, 10), [0, 0, 0, 0], 'triangle coverage escaped the clip');
+
+  api.reset(state);
+  uploadTexture(api, state, 'demo:clip-triangle', 8, 4, () => [208, 0, 208, 255]);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 50, 50]),
+    triangleFrame({
+      points: [[0, 0], [200, 0], [0, 200]],
+      uvs: [[0, 0], [8, 0], [0, 4]],
+      colours: [OPAQUE_WHITE, OPAQUE_WHITE, OPAQUE_WHITE],
+    }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  assertPixel(screen.pixel(10, 10), [208, 0, 208, 255], 'the textured triangle inside the clip was not sampled');
+  assertPixel(screen.pixel(70, 10), [0, 0, 0, 0], 'the textured triangle escaped the clip');
+
+  for (const [name, part] of [
+    ['button', rectOnlyFrame(8, [0, 0, 200, 100], 0, -1)],
+    ['slot', rectOnlyFrame(9)],
+    ['container', rectOnlyFrame(10)],
+    ['tooltip', rectOnlyFrame(11)],
+    ['background', rectOnlyFrame(12)],
+    ['item', itemFrame()],
+  ]) {
+    api.reset(state);
+    api.setFrame(frameOf(
+      clipPushFrame([0, 0, 100, 60]),
+      part,
+      CLIP_POP_FRAME,
+    ));
+    api.paint();
+    assert.notDeepEqual(screen.pixel(50, 30), [0, 0, 0, 0], `${name}: the native stand-in was not drawn inside the clip`);
+    assert.deepEqual(screen.pixel(150, 30), [0, 0, 0, 0], `${name}: the native stand-in escaped the clip`);
+  }
+});
+
+test('a clip changes coverage only: textures, gradients and alpha layers keep their fields', () => {
+  const { api, state, screen } = createClient();
+  api.reset(state);
+  uploadTexture(api, state, 'demo:clip-texture', 8, 4, () => [0, 0, 255, 255]);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 20, 40]),
+    quadFrame({
+      rect: [0, 0, 40, 40], uv: [0, 0, 8, 4], nominal: [8, 4],
+      colours: [OPAQUE_WHITE, OPAQUE_WHITE, OPAQUE_WHITE, OPAQUE_WHITE],
+    }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  assertPixel(screen.pixel(10, 20), [0, 0, 255, 255], 'the textured draw inside the clip was not sampled');
+  assertPixel(screen.pixel(30, 20), [0, 0, 0, 0], 'the textured draw escaped the clip');
+
+  // A textured quad with a varying tint takes the per-pixel path; clipping must not change it.
+  const tints = [
+    rgba(255, 255, 255), rgba(255, 40, 40), rgba(40, 255, 40), rgba(40, 40, 255),
+  ];
+  const textured = {
+    rect: [0, 0, 40, 40], uv: [0, 0, 8, 4], nominal: [8, 4], colours: tints,
+  };
+  api.reset(state);
+  api.setFrame(quadFrame(textured));
+  api.paint();
+  const texturedReference = screen.pixel(10, 20);
+  api.reset(state);
+  api.setFrame(frameOf(clipPushFrame([0, 0, 20, 40]), quadFrame(textured), CLIP_POP_FRAME));
+  api.paint();
+  assert.deepEqual(screen.pixel(10, 20), texturedReference, 'the clipped textured gradient changed its field');
+  assert.deepEqual(screen.pixel(30, 20), [0, 0, 0, 0], 'the textured gradient escaped the clip');
+
+  const rect = [0, 0, 40, 40];
+  const colours = [
+    rgba(255, 20, 80, 255), rgba(20, 255, 40, 128), rgba(40, 80, 255, 0), rgba(240, 160, 40, 64),
+  ];
+  api.reset(state);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 20, 40]),
+    colourQuadFrame({ rect, colours }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  const u = (10.5 - rect[0]) / (rect[2] - rect[0]);
+  const v = (20.5 - rect[1]) / (rect[3] - rect[1]);
+  assertPremultiplied(screen.pixel(10, 20), quadFieldAt(colours, u, v), 'the clipped gradient restarted or rescaled');
+  assert.deepEqual(screen.pixel(30, 20), [0, 0, 0, 0], 'the gradient escaped the clip');
+
+  const lower = rgba(255, 0, 0, 128);
+  const upper = rgba(0, 0, 255, 128);
+  api.reset(state);
+  api.setFrame(frameOf(
+    clipPushFrame([0, 0, 20, 40]),
+    colourQuadFrame({ rect, colours: [lower, lower, lower, lower] }),
+    colourQuadFrame({ rect, colours: [upper, upper, upper, upper] }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+  const expected = over(premultipliedColour(upper), premultipliedColour(lower));
+  assertPremultiplied(screen.pixel(10, 20), expected, 'two alpha layers under a clip did not composite in order');
+  assert.deepEqual(screen.pixel(30, 20), [0, 0, 0, 0], 'an alpha layer escaped the clip');
+});
+
+// ---- real browser acceptance -----------------------------------------------------------------
+//
+// The model above is a Canvas subset, not a browser. This case runs the same shipped client.js in an
+// installed headless Chrome and reads real canvas pixels, including real antialiasing and text. The
+// fixture is portable: it loads client.js relative to itself and stubs only the WebSocket, so it can
+// be opened by any Chromium build. If no browser is installed the case skips rather than pretending.
+
+function findChrome() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.CHROME_BIN,
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, 'Google/Chrome/Application/chrome.exe')
+      : null,
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || null;
+}
+
+function unescapeHtml(text) {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+test('the shipped client clips exactly in an installed headless Chrome', (t) => {
+  const chrome = findChrome();
+  if (!chrome) {
+    t.skip('no Chrome/Chromium installation was found; the portable fixture is clip-acceptance.html');
+    return;
+  }
+
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kotlinmcui-clip-'));
+  try {
+    const fixture = path.join(__dirname, 'clip-acceptance.html');
+    const run = spawnSync(chrome, [
+      '--headless=new',
+      '--disable-gpu',
+      '--no-sandbox',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-extensions',
+      '--hide-scrollbars',
+      '--window-size=640,480',
+      '--allow-file-access-from-files',
+      '--user-data-dir=' + profile,
+      '--dump-dom',
+      pathToFileURL(fixture).href,
+    ], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+
+    assert.equal(run.error, undefined, 'launching Chrome failed: ' + String(run.error));
+    assert.equal(run.status, 0, 'Chrome exited ' + run.status + ': ' + (run.stderr || '').slice(0, 4000));
+    const reportText = /<pre id="result">([\s\S]*?)<\/pre>/.exec(run.stdout || '');
+    assert.ok(reportText, 'the fixture did not report a result; DOM was: ' + (run.stdout || '').slice(0, 4000));
+    const report = JSON.parse(unescapeHtml(reportText[1]));
+    const failures = report.results
+      .filter((entry) => !entry.ok)
+      .map((entry) => entry.name + ': ' + entry.detail)
+      .join('\n');
+    assert.equal(report.fail, 0, 'headless Chrome clip acceptance failed:\n' + failures);
+    assert.ok(report.pass >= 6, 'only ' + report.pass + ' acceptance checks ran');
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
 });

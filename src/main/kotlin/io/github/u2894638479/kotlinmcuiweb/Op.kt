@@ -37,7 +37,16 @@ internal object Op {
      */
     const val TRIANGLES = 2
 
-    /** `[op, l, t, r, b]`; nested clips intersect, and the client keeps a stack. */
+    /**
+     * `[op, l, t, r, b]`; nested clips intersect, and the client keeps a stack.
+     *
+     * The rectangle is in the local coordinates of the draw that opened the scope, so the client
+     * projects its four corners through the transform in force at replay and intersects the exact
+     * quadrilateral with the clip already open. Every push - including one whose rectangle is
+     * unmeasured, nonfinite, empty or reversed - is recorded, and a zero-area rectangle is the
+     * explicit "empty clip" sentinel. That keeps push/pop balanced: a caller's block still runs, but
+     * everything it records under an empty clip is invisible.
+     */
     const val CLIP_PUSH = 3
     const val CLIP_POP = 4
 
