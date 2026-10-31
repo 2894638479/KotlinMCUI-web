@@ -5,7 +5,9 @@ import io.github.u2894638479.kotlinmcui.context.DslScaleContext
 import io.github.u2894638479.kotlinmcui.image.ImageHolder
 import io.github.u2894638479.kotlinmcui.image.ImageSource
 import io.github.u2894638479.kotlinmcui.math.Color
+import io.github.u2894638479.kotlinmcui.math.ColorArray
 import io.github.u2894638479.kotlinmcui.math.Measure
+import io.github.u2894638479.kotlinmcui.math.MeasureArray
 import io.github.u2894638479.kotlinmcui.math.rect.Rect
 import io.github.u2894638479.kotlinmcui.math.transform.Transform
 import io.github.u2894638479.kotlinmcui.text.DslFont
@@ -25,6 +27,15 @@ import io.github.u2894638479.kotlinmcui.text.DslRenderableChar
  * no composition of nested transforms: both are replayed in order by the client, which keeps its own
  * stacks, so doing the arithmetic twice would only be a second place to get it wrong.
  *
+ * ### Primitive input
+ * The recorder implements all four typed primitive entry points (colour-only and textured quads,
+ * `x, y` and `x, y, u, v` triangle lists). Structure is validated before anything is written, and
+ * every numeric value is read into the frame's words before the call returns, so a borrowed mutable
+ * [Rect] or [MeasureArray] is snapshotted rather than retained. A holder with no source is "nothing
+ * to draw"; a non-empty holder always keeps the textured stride and names [MISSING_ASSET] for an
+ * empty id. The browser decides readiness from its own asset cache and paints its checkerboard
+ * texture for a confirmed load failure, through the recorded geometry, UVs, nominal size and tint.
+ *
  * ### The asset table
  * An id (a texture, an item icon) is defined once and referenced by index afterwards. The table
  * lives across frames on purpose: a steady-state frame then carries no definitions at all, and the
@@ -34,6 +45,15 @@ import io.github.u2894638479.kotlinmcui.text.DslRenderableChar
  */
 internal object Recorder : DslRootRenderer<Unit> {
     private const val INITIAL_WORDS = 1 shl 16
+
+    /**
+     * The asset id of a non-empty image whose own identifier is empty.
+     *
+     * The call still has texture semantics, so it cannot travel as [Op.NO_ASSET] without turning a
+     * textured record into an untextured one. This id names "the texture that is missing", which is
+     * exactly what a failed lookup means to the client.
+     */
+    private const val MISSING_ASSET = "kotlinmcuiweb:missing"
 
     private var words = IntArray(INITIAL_WORDS)
 
@@ -67,6 +87,7 @@ internal object Recorder : DslRootRenderer<Unit> {
     private val assets = HashMap<String, Int>()
     private val raw = IntArray(4)
     private val uvRaw = IntArray(4)
+    private val nominal = IntArray(2)
 
     /** Start a frame: the payload is dropped, the asset table is not. */
     fun beginFrame() {
@@ -100,45 +121,47 @@ internal object Recorder : DslRootRenderer<Unit> {
     }
 
     context(renderParam: Unit)
+    override fun renderQuad(rect: Rect, lt: Color, rt: Color, lb: Color, rb: Color) {
+        if (!primitiveRect(rect)) return
+        put(Op.QUAD)
+        put(raw[0]); put(raw[1]); put(raw[2]); put(raw[3])
+        put(lt.rgbaInt); put(rt.rgbaInt); put(lb.rgbaInt); put(rb.rgbaInt)
+        put(Op.NO_ASSET)
+        counts[Op.QUAD]++
+    }
+
+    context(renderParam: Unit)
     override fun renderQuad(
         rect: Rect,
         lt: Color,
         rt: Color,
         lb: Color,
         rb: Color,
-        image: ImageHolder?,
-        uv: Rect?,
+        image: ImageHolder,
+        uv: Rect,
     ) {
-        if (!rawCoords(rect)) return
-        val textured = uv != null && rawUv(uv)
-        val asset = if (textured) assetOf(image) else Op.NO_ASSET
+        // Every rejection happens before the asset lookup, which is the one step that mutates the
+        // frame (a first-use texture definition) and the session's asset table.
+        if (!primitiveRect(rect)) return
+        if (!rawUv(uv)) return
+        val id = texturedId(image) ?: return
+        if (!nominalSize(image)) return
+        val asset = assetOf(id)
         put(Op.QUAD)
         put(raw[0]); put(raw[1]); put(raw[2]); put(raw[3])
         put(lt.rgbaInt); put(rt.rgbaInt); put(lb.rgbaInt); put(rb.rgbaInt)
         put(asset)
-        if (asset != Op.NO_ASSET) {
-            put(uvRaw[0]); put(uvRaw[1]); put(uvRaw[2]); put(uvRaw[3])
-        }
+        put(uvRaw[0]); put(uvRaw[1]); put(uvRaw[2]); put(uvRaw[3])
+        put(nominal[0]); put(nominal[1])
         counts[Op.QUAD]++
     }
 
     context(renderParam: Unit)
-    override fun renderTriangles(vertices: FloatArray, colors: IntArray, image: ImageHolder?) {
-        val count = colors.size
-        if (count == 0) return
-        val textured = imageId(image) != null
-        val stride = if (textured) 4 else 2
-        if (vertices.size < count * stride) return
-        val asset = if (textured) assetOf(image) else Op.NO_ASSET
-        put(Op.TRIANGLES)
-        put(count)
-        put(if (textured) 1 else 0)
-        put(asset)
-        for (i in 0 until count * stride) put(vertices[i].toRawBits())
-        for (i in 0 until count) put(colors[i])
-        counts[Op.TRIANGLES]++
-        this.vertices += count
-    }
+    override fun renderTriangles(vertices: MeasureArray, colors: ColorArray) = triangles(vertices, colors, null)
+
+    context(renderParam: Unit)
+    override fun renderTriangles(vertices: MeasureArray, colors: ColorArray, image: ImageHolder) =
+        triangles(vertices, colors, image)
 
     context(renderParam: Unit, ctx: DslScaleContext)
     override fun renderButton(rect: Rect, highlighted: Boolean, active: Boolean, color: Color) {
@@ -242,6 +265,52 @@ internal object Recorder : DslRootRenderer<Unit> {
     }
 
     /**
+     * The shared body of both triangle overloads.
+     *
+     * Order is the contract: the structure is checked first and always by division and remainder, so
+     * the check itself cannot overflow; then every coordinate is checked; only then is the image
+     * examined and the asset table written. Validation finishing before the first word is written is
+     * what makes "one bad last vertex skips the whole call" true rather than "emits three quarters of
+     * a record". A `null` [image] is the untextured overload; a non-empty holder always keeps the
+     * textured stride, whatever the identifier looks like.
+     */
+    private fun triangles(vertices: MeasureArray, colors: ColorArray, image: ImageHolder?) {
+        val count = colors.size
+        val stride = if (image == null) 2 else 4
+        require(count % 3 == 0) {
+            "a triangle list needs a multiple of three colours, got $count"
+        }
+        require(vertices.size % stride == 0 && vertices.size / stride == count) {
+            "a triangle list needs ${if (stride == 2) "two" else "four"} measures per colour: " +
+                "$count colours need ${count.toLong() * stride} measures, got ${vertices.size}"
+        }
+        if (count == 0) return
+        for (index in 0 until vertices.size) {
+            val measure = vertices[index]
+            if (!measure.isNumber || !measure.raw.toFloat().isFinite()) return
+        }
+        var id: String? = null
+        if (image != null) {
+            // The image is examined only after structure and numbers passed. An empty source is a
+            // valid "nothing to draw", not a malformed call.
+            id = texturedId(image) ?: return
+            if (!nominalSize(image)) return
+        }
+        val asset = if (id == null) Op.NO_ASSET else assetOf(id)
+        put(Op.TRIANGLES)
+        put(count)
+        put(if (id == null) 0 else 1)
+        put(asset)
+        for (index in 0 until vertices.size) put(vertices[index].raw.toFloat().toRawBits())
+        for (index in 0 until count) put(colors[index].rgbaInt)
+        if (id != null) {
+            put(nominal[0]); put(nominal[1])
+        }
+        counts[Op.TRIANGLES]++
+        this.vertices += count
+    }
+
+    /**
      * The four corners of [rect] as raw float bits, or `false` when any of them is unmeasured.
      *
      * An unmeasured rectangle is the framework's way of saying "this was never laid out"; every
@@ -255,36 +324,77 @@ internal object Recorder : DslRootRenderer<Unit> {
         return true
     }
 
-    private fun rawUv(uv: Rect): Boolean {
-        uvRaw[0] = uv.left.pixelsOrElse<Float> { return false }.toRawBits()
-        uvRaw[1] = uv.top.pixelsOrElse<Float> { return false }.toRawBits()
-        uvRaw[2] = uv.right.pixelsOrElse<Float> { return false }.toRawBits()
-        uvRaw[3] = uv.bottom.pixelsOrElse<Float> { return false }.toRawBits()
+    /**
+     * [uv] as raw float bits, or `false` when any edge is unmeasured or not representable as a
+     * finite `Float`. Negative and out-of-range values are kept: sampling is the client's business,
+     * and the framework contract explicitly allows them.
+     */
+    private fun rawUv(uv: Rect): Boolean =
+        putMeasure(uv.left, uvRaw, 0) &&
+            putMeasure(uv.top, uvRaw, 1) &&
+            putMeasure(uv.right, uvRaw, 2) &&
+            putMeasure(uv.bottom, uvRaw, 3)
+
+    /**
+     * The destination rectangle as raw float bits, or `false` unless every edge is measured, finite,
+     * representable as a `Float`, and the rectangle is strictly positive in both axes.
+     *
+     * Kept separate from [rawCoords] on purpose: the widget ops ([Op.BUTTON] and friends) have always
+     * accepted what the layout produced, and this phase tightens only the primitive entry points.
+     */
+    private fun primitiveRect(rect: Rect): Boolean {
+        if (!putMeasure(rect.left, raw, 0)) return false
+        if (!putMeasure(rect.top, raw, 1)) return false
+        if (!putMeasure(rect.right, raw, 2)) return false
+        if (!putMeasure(rect.bottom, raw, 3)) return false
+        // Comparing edges instead of subtracting keeps a huge-but-finite width from overflowing.
+        return Float.fromBits(raw[2]) > Float.fromBits(raw[0]) &&
+            Float.fromBits(raw[3]) > Float.fromBits(raw[1])
+    }
+
+    /** One measure as finite float bits, or `false` when it is unmeasured or overflows a `Float`. */
+    private fun putMeasure(measure: Measure, into: IntArray, index: Int): Boolean {
+        if (!measure.isNumber) return false
+        val value = measure.raw.toFloat()
+        if (!value.isFinite()) return false
+        into[index] = value.toRawBits()
         return true
     }
 
-    private fun assetOf(image: ImageHolder?): Int =
-        imageId(image)?.let(::assetOf) ?: Op.NO_ASSET
+    /**
+     * Copy an image's nominal pixel size into [nominal], or return `false` when it is unusable.
+     *
+     * The size travels per draw rather than per asset: the same id may be sampled with a different
+     * nominal size elsewhere in the frame, and the client needs this draw's size to scale its UVs
+     * onto the pixels it actually holds.
+     */
+    private fun nominalSize(image: ImageHolder): Boolean {
+        if (!putMeasure(image.width, nominal, 0)) return false
+        if (!putMeasure(image.height, nominal, 1)) return false
+        return Float.fromBits(nominal[0]) > 0f && Float.fromBits(nominal[1]) > 0f
+    }
 
     /**
-     * The id a holder travels under, or `null` when there is nothing to draw.
+     * The id a textured holder travels under, or `null` when its source is empty.
      *
      * The three sources are three different namespaces for the client: a resource is the framework's
      * own `namespace:path` id, a local file is this backend's `local:` id (the transport serves it
      * only because [WebUtils.localImage] described that path), and a remote url is the url itself.
      * Which of them it is cannot be confused, because [ImageSource] is a type rather than a prefix.
      *
-     * An empty id is the old, harmless way of saying "no image", kept as "no asset" rather than
-     * written into the frame as a zero-length texture definition.
+     * A non-empty source with an empty identifier is a resource problem, not a format decision: the
+     * call keeps its textured shape and refers to [MISSING_ASSET]. It never turns into an untextured
+     * draw. Readiness and failure memory belong to the client's asset cache, which paints the
+     * checkerboard texture for a confirmed miss while a pending load draws nothing.
      */
-    private fun imageId(image: ImageHolder?): String? {
-        val source = image?.source ?: return null
+    private fun texturedId(image: ImageHolder): String? {
+        val source = image.source ?: return null
         val id = when (source) {
             is ImageSource.LocalFile -> WebUtils.localImageId(source.file)
             is ImageSource.Resource -> source.location
             is ImageSource.Remote -> source.url
         }
-        return id.takeIf { it.isNotEmpty() }
+        return id.ifEmpty { MISSING_ASSET }
     }
 
     /**

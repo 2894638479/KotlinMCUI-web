@@ -232,15 +232,15 @@ internal class WebServer(
      * Ids are the framework's `namespace:path`, which resolves to `/assets/<namespace>/<path>` on the
      * classpath - that is where the framework's own icon lives, and where a mod's assets live in its
      * own jar. A plain path is tried as it is, and a `local:` id is served only when this backend
-     * described that file, so a client cannot name a path of its own. Anything else is a 404 and the
-     * client keeps drawing its placeholder.
+     * described that file, so a client cannot name a path of its own. Anything else is a 404; the
+     * client records a confirmed failure and samples its missing-texture checkerboard.
      */
     private fun asset(socket: Socket, rawId: String) {
         val id = runCatching { URLDecoder.decode(rawId, "UTF-8") }.getOrDefault(rawId)
         val bytes = assetBytes(id)
         val output = BufferedOutputStream(socket.getOutputStream())
         if (bytes == null) {
-            dslLogger.info("web assets: '$id' was not found, the client keeps its placeholder")
+            dslLogger.info("web assets: '$id' was not found, the client draws its missing texture")
             output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
         } else {
             output.write(

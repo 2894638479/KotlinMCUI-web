@@ -19,8 +19,10 @@ import java.util.Locale
  *
  * Two deliberate approximations, both noted in the file itself: a quad whose four corner colours are
  * not affine-related is emitted as the two triangles the game's backends draw (not the bilinear field
- * a canvas can produce), and a textured quad is a placeholder carrying its asset id, because this
- * writer has no texture server.
+ * a canvas can produce), and textured records are diagnostic checkerboard polygons carrying their
+ * asset id, UVs and nominal size. This writer has no texture server and no pixels; it cannot prove
+ * what the browser sampled. The checkerboard is therefore explicitly a diagnostic marker, never a
+ * claim that the draw fell back to a colour.
  */
 internal object SvgWriter {
     fun write(frame: IntArray, size: Int, width: Int, height: Int, file: File) {
@@ -30,6 +32,11 @@ internal object SvgWriter {
         svg.append("""<svg xmlns="http://www.w3.org/2000/svg" width="$width" height="$height" viewBox="0 0 $width $height">""")
         svg.append('\n')
         svg.append("""<rect width="$width" height="$height" fill="#101014"/>""").append('\n')
+        // Explicit texture marker for this diagnostic artifact: no real pixels exist here, so a
+        // textured draw must never turn into a colour fill. The checker is intentional.
+        svg.append("""<defs><pattern id="texture-checker" patternUnits="userSpaceOnUse" width="8" height="8">""")
+        svg.append("""<rect width="8" height="8" fill="#d000d0"/><rect width="4" height="4" fill="#181818"/>""")
+        svg.append("""<rect x="4" y="4" width="4" height="4" fill="#181818"/></pattern></defs>""").append('\n')
         val perOp = LongArray(Op.COUNT)
         val clips = ArrayList<String>()
         var transform = Matrix()
@@ -89,12 +96,25 @@ internal object SvgWriter {
         val rb = frame[at + 8]
         val corners = corners(rect, transform)
         val asset = frame[at + 9]
-        val title = if (asset == Op.NO_ASSET) "" else "<title>asset #$asset</title>"
         if (asset != Op.NO_ASSET) {
-            // No pixels on this side: the placeholder marks where a texture goes and carries its id.
-            svg.append("<polygon points=\"${rectPoints(corners)}\" fill=\"${css(mix(lt, rt, lb, rb))}\" fill-opacity=\"0.5\" stroke=\"#8a8a8a\" stroke-dasharray=\"3 3\">$title</polygon>\n")
+            // No pixels on this side: an explicit checker pattern plus the asset, UV and nominal
+            // size it would have sampled. It is a diagnostic marker, not a sampled texture.
+            val u0 = Float.fromBits(frame[at + 10])
+            val v0 = Float.fromBits(frame[at + 11])
+            val u1 = Float.fromBits(frame[at + 12])
+            val v1 = Float.fromBits(frame[at + 13])
+            val nominalWidth = Float.fromBits(frame[at + 14])
+            val nominalHeight = Float.fromBits(frame[at + 15])
+            svg.append(
+                "<polygon points=\"${rectPoints(corners)}\" fill=\"url(#texture-checker)\" " +
+                    "stroke=\"#d8d8d8\" stroke-dasharray=\"3 3\">" +
+                    "<title>texture asset #$asset uv=[${number(u0)},${number(v0)},${number(u1)},${number(v1)}] " +
+                    "nominal=${number(nominalWidth)}x${number(nominalHeight)} " +
+                    "(diagnostic checkerboard: no pixels in SVG)</title></polygon>\n",
+            )
             return
         }
+        val title = ""
         if (lt == rt && lt == lb && lt == rb) {
             svg.append("<polygon points=\"${rectPoints(corners)}\" fill=\"${css(lt)}\">$title</polygon>\n")
             return
@@ -110,14 +130,28 @@ internal object SvgWriter {
         val stride = if (textured) 4 else 2
         val verticesAt = at + 4
         val coloursAt = verticesAt + count * stride
+        val asset = frame[at + 3]
+        val nominalWidth = if (textured) Float.fromBits(frame[coloursAt + count]) else 0f
+        val nominalHeight = if (textured) Float.fromBits(frame[coloursAt + count + 1]) else 0f
         var i = 0
         while (i + 2 < count) {
             val projected = (0..2).map { step ->
                 val base = verticesAt + (i + step) * stride
                 transform.project(Float.fromBits(frame[base]), Float.fromBits(frame[base + 1]))
             }
-            val colour = mix(frame[coloursAt + i], frame[coloursAt + i + 1], frame[coloursAt + i + 2], 0)
-            svg.append("<polygon points=\"${points(projected)}\" fill=\"${css(colour)}\"/>\n")
+            if (textured) {
+                // A textured triangle keeps its texture marker even without pixels; it never falls
+                // back to the per-vertex colour average.
+                svg.append(
+                    "<polygon points=\"${points(projected)}\" fill=\"url(#texture-checker)\" " +
+                        "stroke=\"#d8d8d8\" stroke-dasharray=\"3 3\">" +
+                        "<title>texture asset #$asset nominal=${number(nominalWidth)}x${number(nominalHeight)} " +
+                        "(diagnostic checkerboard: no pixels in SVG)</title></polygon>\n",
+                )
+            } else {
+                val colour = mix(frame[coloursAt + i], frame[coloursAt + i + 1], frame[coloursAt + i + 2], 0)
+                svg.append("<polygon points=\"${points(projected)}\" fill=\"${css(colour)}\"/>\n")
+            }
             i += 3
         }
     }

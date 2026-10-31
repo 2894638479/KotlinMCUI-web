@@ -298,7 +298,7 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
         imageLoader.launch {
             val size = runCatching { ImageIO.read(file) }.getOrNull()
             if (size == null) {
-                dslLogger.warn("web assets: '$file' could not be read, the client will draw its placeholder")
+                dslLogger.warn("web assets: '$file' could not be read, so this provider returns ImageHolder.empty and nothing is drawn")
             }
             publishLocalImage(id, entry, size)
         }
@@ -361,7 +361,7 @@ internal object WebUtils : DslPlatformUtils, DslRootUtils {
      *
      * The contract forbids waiting on io here, so this cannot download anything. A transport that
      * gains a downloader can start answering from a cache; until then `empty` is the honest answer,
-     * and a page that uses one draws the client's placeholder.
+     * so a page that uses one draws nothing rather than guessing that the load failed.
      */
     override fun remoteImage(url: String): ImageHolder = ImageHolder.empty
 

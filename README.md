@@ -21,7 +21,7 @@
 
 端口默认 8080，容易和别的服务撞，所以示例一律用 `-Pport`。页面名见 `Pages.kt` 的 `PAGE_NAMES`。
 `measure` 的输出全在 stdout。`-PgameDir=<Minecraft 安装目录>` 让物品与方块贴图从
-`versions/*/*.jar` 与 `mods/*.jar` 里取；不给就是占位框。
+`versions/*/*.jar` 与 `mods/*.jar` 里取；取不到时浏览器画检查板缺图纹理。
 
 ## 构建
 

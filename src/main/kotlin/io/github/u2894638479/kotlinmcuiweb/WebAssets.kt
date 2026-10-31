@@ -13,7 +13,7 @@ import java.util.zip.ZipFile
  * first (the framework's own icon and anything a mod ships as a resource), then the jars of the game
  * installation the host points at - the client jar for vanilla textures and items, and every jar in
  * the `mods` directory for what mods add. Without a game directory the second search finds nothing,
- * every asset the game owns is answered with a miss, and the client draws its placeholder.
+ * every asset the game owns is answered with a miss, and the client draws its missing texture.
  *
  * Ids are the framework's `namespace:path`. A path that already names a directory is taken as it is
  * (`minecraft:textures/block/dirt.png`); a bare name is an item or a block, which is where the game
@@ -112,7 +112,7 @@ internal object WebAssets {
                 Files.list(mods).use { files -> files.forEach { file -> if (file.isJar()) found.add(file) } }
             }
         }.onFailure { dslLogger.warn("web assets: '${gameDir}' could not be scanned: ${it.message}") }
-        if (found.isEmpty()) dslLogger.info("web assets: no game jars under '$gameDir', game textures stay placeholders")
+        if (found.isEmpty()) dslLogger.info("web assets: no game jars under '$gameDir', game textures use the missing texture")
         jars = found
         return found
     }

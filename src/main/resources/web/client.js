@@ -12,7 +12,7 @@ const NOCHANGE = 0x4e;
 const KEYFRAME = 0x4b;
 const DELTA = 0x44;
 // The asset table, which the server sends before a keyframe: a client that connects later has missed
-// the definitions the frame was the first to use, and would otherwise draw placeholders forever.
+// the definitions the frame was the first to use, and would otherwise draw missing textures forever.
 const ASSETS = 0x41;
 const KEYFRAME_HEADER = 9;
 const DELTA_HEADER = 17;
@@ -97,10 +97,13 @@ let painted = false;
 let asking = true;
 let stillUntil = 0;
 
-// The asset ids a frame defined, and the pixels once they arrive. A failed load is remembered as null
-// so a missing asset is asked for once rather than every frame.
+// The asset ids a frame defined, and the pixels once they arrive. `undefined` means no definition;
+// `null` means the request is still in flight (draw nothing); a canvas or image is ready pixels.
+// A failed load becomes the checkerboard canvas, so it is a texture, never an untextured fill, and
+// the failure is not retried on every frame.
 const assets = [];
 const images = {};
+let checkerboard = null;
 
 function resizeCanvas() {
   dpr = window.devicePixelRatio || 1;
@@ -261,10 +264,11 @@ function decode(base, message) {
 function strideAt(words, at) {
   const op = words[at];
   switch (op) {
-    case Op.QUAD: return words[at + 9] === Op.NO_ASSET ? 10 : 14;
+    case Op.QUAD: return words[at + 9] === Op.NO_ASSET ? 10 : 16;
     case Op.TRIANGLES: {
       const vertices = words[at + 1];
-      return 4 + vertices * (words[at + 2] !== 0 ? 4 : 2) + vertices;
+      const textured = words[at + 2] !== 0;
+      return 4 + vertices * (textured ? 4 : 2) + vertices + (textured ? 2 : 0);
     }
     case Op.CLIP_PUSH: return 5;
     case Op.TRANSFORM_PUSH: return 10;
@@ -350,7 +354,7 @@ function paint() {
         if (rect) {
           ctx.save();
           ctx.beginPath();
-          path(rect);
+          path(ctx, rect);
           ctx.clip();
           clips++;
         }
@@ -377,22 +381,23 @@ function paint() {
 function corners(words, at, transform) {
   const left = floatOf(words[at]), top = floatOf(words[at + 1]);
   const right = floatOf(words[at + 2]), bottom = floatOf(words[at + 3]);
-  if ([left, top, right, bottom].some((v) => Number.isNaN(v))) return null;
-  return [
+  if (![left, top, right, bottom].every(Number.isFinite)) return null;
+  const points = [
     project(transform, left, top), project(transform, right, top),
     project(transform, right, bottom), project(transform, left, bottom),
   ];
+  return points.every(finitePoint) ? points : null;
 }
 
-function path(points) {
-  ctx.moveTo(points[0][0], points[0][1]);
-  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
-  ctx.closePath();
+function path(context, points) {
+  context.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) context.lineTo(points[i][0], points[i][1]);
+  context.closePath();
 }
 
 function fill(points, colour) {
   ctx.beginPath();
-  path(points);
+  path(ctx, points);
   ctx.fillStyle = colour;
   ctx.fill();
 }
@@ -445,26 +450,36 @@ function quad(words, at, transform) {
   const lt = words[at + 5], rt = words[at + 6], lb = words[at + 7], rb = words[at + 8];
   const asset = words[at + 9];
   if (asset !== Op.NO_ASSET) {
-    // A textured quad is placed with the transform rather than projected by hand, because
-    // `drawImage` can only be placed with an affine one. Everywhere else this painter projects
-    // corners itself so a perspective comes out right; here the perspective case is what falls back
-    // to the placeholder instead.
     const image = imageOf(asset);
+    // No pixels yet (or no definition): this draw is invisible. A failed load is already a
+    // checkerboard image here, so it goes through the same texture path rather than a fill.
+    if (!image) return;
     const u0 = floatOf(words[at + 10]), v0 = floatOf(words[at + 11]);
     const u1 = floatOf(words[at + 12]), v1 = floatOf(words[at + 13]);
-    if (image && isAffine(transform) && u1 > u0 && v1 > v0 &&
-        u0 >= 0 && v0 >= 0 && u1 <= image.width && v1 <= image.height) {
-      const left = floatOf(words[at + 1]), top = floatOf(words[at + 2]);
-      const right = floatOf(words[at + 3]), bottom = floatOf(words[at + 4]);
-      ctx.save();
-      ctx.setTransform(transform[0], transform[3], transform[1], transform[4], transform[2], transform[5]);
-      // Textures are scaled like the game scales them: nearest neighbour, not a blur.
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(image, u0, v0, u1 - u0, v1 - v0, left, top, right - left, bottom - top);
-      ctx.restore();
-      return;
+    const width = floatOf(words[at + 14]), height = floatOf(words[at + 15]);
+    if (!positive(width) || !positive(height)) return;
+    // A quad with one colour on all four corners and UVs that are affine across it is drawn in one
+    // piece. Two clipped triangles composite the shared diagonal twice and leave a seam there; a
+    // single clip cannot. Four unrelated corner colours keep the framework's two-triangle model.
+    if (lt === rt && rt === lb && lb === rb) {
+      const map = quadMap([[u0, v0], [u1, v0], [u1, v1], [u0, v1]], points, image, width, height);
+      if (map) {
+        texturedShape(points, image, [lt, rt, rb, lb], map);
+        return;
+      }
     }
-    paintBox(points, 'rgba(140,140,140,0.6)');
+    // The record's corners are LT, RT, RB, LB; the word order is lt, rt, lb, rb. Draw the two
+    // triangles the game draws, each with its own UVs and per-vertex tint.
+    texturedTriangle(
+      [points[0], points[1], points[3]],
+      [[u0, v0], [u1, v0], [u0, v1]],
+      image, width, height, [lt, rt, lb],
+    );
+    texturedTriangle(
+      [points[1], points[2], points[3]],
+      [[u1, v0], [u1, v1], [u0, v1]],
+      image, width, height, [rt, rb, lb],
+    );
     return;
   }
   if (lt === rt && lt === lb && lt === rb) {
@@ -496,9 +511,40 @@ function quad(words, at, transform) {
 
 function triangles(words, at, transform) {
   const count = words[at + 1];
-  const stride = words[at + 2] !== 0 ? 4 : 2;
+  const textured = words[at + 2] !== 0;
+  const stride = textured ? 4 : 2;
   const verticesAt = at + 4;
   const coloursAt = verticesAt + count * stride;
+  // A malformed vertex rejects the whole record rather than half of it: a partially drawn list
+  // would leave triangles the server thinks it asked for missing from the picture.
+  for (let i = 0; i < count; i++) {
+    const base = verticesAt + i * stride;
+    for (let part = 0; part < (textured ? 4 : 2); part++) {
+      if (!Number.isFinite(floatOf(words[base + part]))) return;
+    }
+  }
+  if (textured) {
+    const image = imageOf(words[at + 3]);
+    // Pending, undefined or not-yet-ready: no visible draw. A failed load is the checkerboard.
+    if (!image) return;
+    const width = floatOf(words[coloursAt + count]);
+    const height = floatOf(words[coloursAt + count + 1]);
+    if (!positive(width) || !positive(height)) return;
+    for (let i = 0; i + 2 < count; i += 3) {
+      const points = [];
+      const uvs = [];
+      for (let step = 0; step < 3; step++) {
+        const base = verticesAt + (i + step) * stride;
+        points.push(project(transform, floatOf(words[base]), floatOf(words[base + 1])));
+        uvs.push([floatOf(words[base + 2]), floatOf(words[base + 3])]);
+      }
+      texturedTriangle(
+        points, uvs, image, width, height,
+        [words[coloursAt + i], words[coloursAt + i + 1], words[coloursAt + i + 2]],
+      );
+    }
+    return;
+  }
   for (let i = 0; i + 2 < count; i += 3) {
     const points = [0, 1, 2].map((step) => {
       const base = verticesAt + (i + step) * stride;
@@ -508,6 +554,330 @@ function triangles(words, at, transform) {
     if (colours[0] === colours[1] && colours[1] === colours[2]) fill(points, css(colours[0]));
     else shadeTriangle(points, colours);
   }
+}
+
+/** Whether [value] is a per-draw dimension: finite and positive, not merely greater than zero. */
+function positive(value) {
+  return Number.isFinite(value) && value > 0;
+}
+
+/** Whether a projected point is something Canvas can place. */
+function finitePoint(point) {
+  return Number.isFinite(point[0]) && Number.isFinite(point[1]);
+}
+
+/**
+ * Draw one triangle of a texture, modulated by its per-vertex colours.
+ *
+ * The UVs are in the draw's nominal image pixel space, so they are scaled by the pixels actually
+ * held: a loaded image of another resolution and the missing-texture checkerboard both preserve the
+ * recorded sampling rectangle. See [texturedShape] for how the tint and the two alphas are combined.
+ */
+function texturedTriangle(points, uvs, image, nominalWidth, nominalHeight, colours) {
+  const actual = actualUvs(uvs, image, nominalWidth, nominalHeight);
+  texturedShape(points, image, colours, textureMap(actual, points));
+}
+
+/**
+ * Draw one textured polygon, modulated by [colours], onto the screen.
+ *
+ * The modulation is done on a scratch surface and composited onto the screen exactly once with
+ * `source-over`, because the blend modes it needs - `multiply` for the tint, `destination-in` for
+ * the alphas - apply to the whole destination. Running them on the screen would multiply or clear
+ * whatever the page had already painted underneath the polygon. The scratch claims only the
+ * polygon's visible bounds, is reused by every draw, and never grows past the canvas.
+ *
+ * The result is the framework's model: RGB is the texture's colour times the interpolated vertex
+ * colour, and alpha is the texture's alpha times the interpolated vertex alpha, each applied once.
+ * `multiply` is only exact when its destination is opaque - over a translucent backdrop Canvas
+ * mixes the backdrop into the result - so the tint starts from an opaque copy of the texture's
+ * colour and the real alpha is put back afterwards, instead of multiplying the tint into the
+ * texture's own alpha and squaring it.
+ *
+ * A polygon with no tint is drawn straight onto the screen with one `source-over`; a white tint is
+ * composited from the texture's own alpha without the multiply. Both keep the ordinary cases free
+ * of the extra passes. True projective interpolation and the shared diagonal of a quad whose four
+ * corners have unrelated colours remain approximated, as the docs record.
+ */
+function texturedShape(points, image, colours, map) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!positive(width) || !positive(height)) return;
+  if (!points.every(finitePoint)) return;
+  const uniform = colours.every((colour) => colour === colours[0]);
+  const tint = colours[0];
+  // A white tint leaves the texture's RGB alone, so the texture itself is the source and neither
+  // the tint pass nor the alpha restore is needed.
+  const whiteRgb = colours.every(isWhiteRgb);
+  if (uniform && isWhite(tint)) {
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.beginPath();
+      path(ctx, points);
+      ctx.clip();
+      drawTexture(ctx, image, map, points, 0, 0);
+    } finally {
+      ctx.restore();
+    }
+    return;
+  }
+  const bounds = visibleBounds(points);
+  if (bounds === null) return;
+  const [left, top, right, bottom] = bounds;
+  const boxWidth = right - left, boxHeight = bottom - top;
+  const dx = -left, dy = -top;
+  const scratch = scratchFor(boxWidth, boxHeight);
+  scratch.save();
+  try {
+    scratch.setTransform(1, 0, 0, 1, dx, dy);
+    scratch.clearRect(left, top, boxWidth, boxHeight);
+    scratch.beginPath();
+    path(scratch, points);
+    scratch.clip();
+    if (whiteRgb) {
+      drawTexture(scratch, image, map, points, dx, dy);
+    } else {
+      // The multiply destination, not the tint, has to be opaque for the product to be exact.
+      drawTexture(scratch, opaqueSource(image) || image, map, points, dx, dy);
+      scratch.globalCompositeOperation = 'multiply';
+      if (uniform) {
+        scratch.setTransform(1, 0, 0, 1, dx, dy);
+        scratch.fillStyle = css(tint | 0xff);
+        scratch.fillRect(left, top, boxWidth, boxHeight);
+      } else {
+        const field = opaqueField(colours);
+        scratch.setTransform(...shifted(unitMap(points), dx, dy));
+        scratch.imageSmoothingEnabled = true;
+        scratch.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
+      }
+      // Put the texture's alpha back, which the opaque destination above replaced.
+      scratch.globalCompositeOperation = 'destination-in';
+      drawTexture(scratch, image, map, points, dx, dy);
+    }
+    if (colours.some((colour) => (colour & 0xff) !== 0xff)) {
+      // The vertex tint's alpha multiplies the texture's alpha, once.
+      scratch.globalCompositeOperation = 'destination-in';
+      if (uniform) {
+        scratch.setTransform(1, 0, 0, 1, dx, dy);
+        scratch.fillStyle = `rgba(255,255,255,${((tint & 0xff) / 255).toFixed(3)})`;
+        scratch.fillRect(left, top, boxWidth, boxHeight);
+      } else {
+        const field = triangleField(colours);
+        scratch.setTransform(...shifted(unitMap(points), dx, dy));
+        scratch.imageSmoothingEnabled = true;
+        scratch.drawImage(field, 0, 0, FIELD_SIZE, FIELD_SIZE, 0, 0, 1, 1);
+      }
+    }
+  } finally {
+    scratch.restore();
+  }
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratchSurface.canvas, 0, 0, boxWidth, boxHeight, left, top, boxWidth, boxHeight);
+  } finally {
+    ctx.restore();
+  }
+}
+
+/** The UVs scaled from the draw's nominal size to the pixels actually held. */
+function actualUvs(uv, image, nominalWidth, nominalHeight) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const scaleX = width / nominalWidth;
+  const scaleY = height / nominalHeight;
+  return uv.map(([u, v]) => [u * scaleX, v * scaleY]);
+}
+
+/**
+ * The affine map that covers a whole quad, or null when its UVs are not affine across the fourth
+ * corner - such a quad has to keep the framework's two-triangle sampling.
+ */
+function quadMap(uv, points, image, nominalWidth, nominalHeight) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!positive(width) || !positive(height)) return null;
+  const actual = actualUvs(uv, image, nominalWidth, nominalHeight);
+  const map = textureMap([actual[0], actual[1], actual[3]], [points[0], points[1], points[3]]);
+  if (!map) return null;
+  const corner = mapPoint(map, actual[2][0], actual[2][1]);
+  return Math.abs(corner[0] - points[2][0]) <= 0.5 && Math.abs(corner[1] - points[2][1]) <= 0.5
+    ? map
+    : null;
+}
+
+/** Where [map] sends one UV point. */
+function mapPoint(map, u, v) {
+  return [map[0] * u + map[2] * v + map[4], map[1] * u + map[3] * v + map[5]];
+}
+
+/** [map] moved by the scratch surface's origin. */
+function shifted(map, dx, dy) {
+  return [map[0], map[1], map[2], map[3], map[4] + dx, map[5] + dy];
+}
+
+/**
+ * The device-pixel rectangle a polygon can actually touch, or null when it is off the canvas.
+ *
+ * The temporary surface is sized from this, so a triangle projected far off-screen cannot ask for
+ * an unbounded allocation.
+ */
+function visibleBounds(points) {
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const [x, y] of points) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < left) left = x;
+    if (y < top) top = y;
+    if (x > right) right = x;
+    if (y > bottom) bottom = y;
+  }
+  left = Math.max(0, Math.floor(left));
+  top = Math.max(0, Math.floor(top));
+  right = Math.min(canvas.width, Math.ceil(right));
+  bottom = Math.min(canvas.height, Math.ceil(bottom));
+  return right > left && bottom > top ? [left, top, right, bottom] : null;
+}
+
+// One scratch surface for every textured draw, grown to the largest polygon seen and never past the
+// canvas. Reusing it is what keeps a frame full of textured quads from allocating per triangle.
+const scratchSurface = { canvas: null };
+
+function scratchFor(width, height) {
+  const surface = scratchSurface.canvas || (scratchSurface.canvas = document.createElement('canvas'));
+  const context = surface.getContext('2d');
+  if (surface.width < width) surface.width = width;
+  if (surface.height < height) surface.height = height;
+  return context;
+}
+
+// The opaque-RGB copy of each asset, built once. Keyed by the image object (a WeakMap, so it goes
+// away with the asset), never by tint: a per-tint full-image cache would grow with every colour the
+// page draws. A null entry means the browser would not let us read the pixels, and the draw falls
+// back to the image itself with only the partial-alpha matte approximated.
+const opaqueSources = new WeakMap();
+
+function opaqueSource(image) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!positive(width) || !positive(height)) return null;
+  const cached = opaqueSources.get(image);
+  if (cached && cached.width === width && cached.height === height) return cached.canvas;
+  const surface = document.createElement('canvas');
+  surface.width = width;
+  surface.height = height;
+  const context = surface.getContext('2d');
+  let opaque = null;
+  try {
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, width, height);
+    const data = pixels.data;
+    for (let i = 3; i < data.length; i += 4) data[i] = 255;
+    context.putImageData(pixels, 0, 0);
+    opaque = surface;
+  } catch (error) {
+    opaque = null;
+  }
+  opaqueSources.set(image, { canvas: opaque, width, height });
+  return opaque;
+}
+
+// CanvasPatterns repeat the texture instead of leaving out-of-range UVs blank. Cached per image and
+// context: two patterns exist per asset at most (screen and scratch), never one per draw.
+const patterns = new WeakMap();
+
+function patternOf(context, image) {
+  let byContext = patterns.get(image);
+  if (!byContext) {
+    byContext = new Map();
+    patterns.set(image, byContext);
+  }
+  if (!byContext.has(context)) {
+    let pattern = null;
+    try {
+      pattern = context.createPattern(image, 'repeat');
+    } catch (error) {
+      pattern = null;
+    }
+    byContext.set(context, pattern || null);
+  }
+  return byContext.get(context);
+}
+
+/**
+ * Sample [image] through [map] into the current path, repeating outside the image.
+ *
+ * The UVs are nominal pixels, so repetition has the image's own pixel period; a UV past the edge
+ * shows the opposite edge instead of nothing, which is what the framework's samplers do. A pattern
+ * costs one fill however far the UVs run, so a quad with a huge UV extent cannot ask for a tile
+ * loop. When the browser cannot make a pattern (or there is no invertible map) the draw still has
+ * to be textured: it falls back to one transformed `drawImage` or to stretching into the bounds,
+ * never to a colour fill.
+ *
+ * [dx], [dy] place the draw on the scratch surface, whose origin is the polygon's visible corner.
+ */
+function drawTexture(context, image, map, points, dx, dy) {
+  context.imageSmoothingEnabled = false;
+  if (map) {
+    const pattern = patternOf(context, image);
+    context.setTransform(map[0], map[1], map[2], map[3], map[4] + dx, map[5] + dy);
+    if (pattern) {
+      context.fillStyle = pattern;
+      context.fill();
+      return;
+    }
+    context.drawImage(image, 0, 0);
+    return;
+  }
+  // Degenerate UVs have no invertible sampling map. Sampling details are a later pixel-semantics
+  // project, but the draw still has to be textured rather than a colour fill.
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (!(x1 > x0) || !(y1 > y0)) return;
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  context.setTransform(1, 0, 0, 1, dx, dy);
+  context.drawImage(image, 0, 0, width, height, x0, y0, x1 - x0, y1 - y0);
+}
+
+/** The affine map from the three actual UV points to the three projected triangle points. */
+function textureMap(uv, points) {
+  const [u0, v0] = uv[0];
+  const u1 = uv[1][0] - u0, v1 = uv[1][1] - v0;
+  const u2 = uv[2][0] - u0, v2 = uv[2][1] - v0;
+  const determinant = u1 * v2 - u2 * v1;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-6) return null;
+  const x1 = points[1][0] - points[0][0], y1 = points[1][1] - points[0][1];
+  const x2 = points[2][0] - points[0][0], y2 = points[2][1] - points[0][1];
+  const a = (x1 * v2 - x2 * v1) / determinant;
+  const c = (u1 * x2 - u2 * x1) / determinant;
+  const b = (y1 * v2 - y2 * v1) / determinant;
+  const d = (u1 * y2 - u2 * y1) / determinant;
+  const e = points[0][0] - a * u0 - c * v0;
+  const f = points[0][1] - b * u0 - d * v0;
+  return [a, b, c, d, e, f];
+}
+
+/** The unit square to projected-triangle matrix, used to place the cached colour field. */
+function unitMap(points) {
+  return [
+    points[1][0] - points[0][0], points[1][1] - points[0][1],
+    points[2][0] - points[0][0], points[2][1] - points[0][1],
+    points[0][0], points[0][1],
+  ];
+}
+
+function isWhite(packed) {
+  return packed === -1 || packed === 0xffffffff;
+}
+
+/** Whether a packed colour has white RGB, whatever its alpha. */
+function isWhiteRgb(packed) {
+  return ((packed & 0xffffff00) >>> 0) === 0xffffff00;
 }
 
 /**
@@ -524,7 +894,7 @@ function shadeTriangle(points, colours) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.beginPath();
-  path(points);
+  path(ctx, points);
   ctx.clip();
   // (0,0) -> first vertex, (1,0) -> second, (0,1) -> third: exactly the affine map of the field.
   ctx.setTransform(
@@ -546,7 +916,21 @@ const FIELD_SIZE = 16;
 
 /** The colour field of a triangle as a small image, cached by the colours it is built from. */
 function triangleField(colours) {
-  const key = colours.join(',');
+  return fieldOf(colours, false);
+}
+
+/**
+ * The same field with alpha forced opaque, for use as a `multiply` source.
+ *
+ * The multiply has to see the tint's colour only: a translucent source would mix the destination
+ * into the product, and the vertex alpha is applied by its own `destination-in` pass anyway.
+ */
+function opaqueField(colours) {
+  return fieldOf(colours, true);
+}
+
+function fieldOf(colours, opaque) {
+  const key = (opaque ? 'o:' : 'a:') + colours.join(',');
   const cached = fields.get(key);
   if (cached) return cached;
 
@@ -567,6 +951,10 @@ function triangleField(colours) {
       const u = (x + 0.5) / FIELD_SIZE;
       const at = (y * FIELD_SIZE + x) * 4;
       for (let channel = 0; channel < 4; channel++) {
+        if (opaque && channel === 3) {
+          image.data[at + channel] = 255;
+          continue;
+        }
         const value =
           c00[channel] * (1 - u) * (1 - v) +
           c10[channel] * u * (1 - v) +
@@ -626,7 +1014,7 @@ function item(words, at, transform) {
   paintBox(points, '#3a3a44');
   ctx.strokeStyle = '#8a8a8a';
   ctx.beginPath();
-  path(points);
+  path(ctx, points);
   ctx.stroke();
 }
 
@@ -681,15 +1069,53 @@ function wake() {
 function defineAsset(index, id) {
   assets[index] = id;
   if (id in images) return;
+  let url;
+  try {
+    url = '/asset/' + encodeURIComponent(id);
+  } catch (error) {
+    // An id with an unpaired UTF-16 surrogate cannot be percent-encoded and no server could answer
+    // it. That is a confirmed miss like a 404: cache the missing texture rather than throw out of
+    // the frame message and leave every later draw undefined.
+    images[id] = missingTexture();
+    send('log client could not encode asset id, drawing the missing texture');
+    return;
+  }
   images[id] = null;
   const image = new Image();
   image.onload = () => {
     images[id] = image;
     wake();
   };
-  // A miss is worth saying out loud: it is the difference between a placeholder and a broken path.
-  image.onerror = () => send('log client could not load asset: ' + id);
-  image.src = '/asset/' + encodeURIComponent(id);
+  // A confirmed miss is data, not a reason to throw or to paint a colour: cache the checkerboard
+  // and keep drawing this texture through the recorded geometry and UVs.
+  image.onerror = () => {
+    images[id] = missingTexture();
+    send('log client could not load asset, drawing the missing texture: ' + id);
+    wake();
+  };
+  image.src = url;
+}
+
+/**
+ * The texture used for a confirmed missing resource.
+ *
+ * It is a real checkerboard canvas rather than a flat colour, so the failure is visibly a texture
+ * and the tint path still modulates it. One instance is shared; UV scaling uses each draw's own
+ * nominal size, so a shared image is correct even when the same id has different nominal sizes.
+ */
+function missingTexture() {
+  if (checkerboard !== null) return checkerboard;
+  const tile = 8;
+  checkerboard = document.createElement('canvas');
+  checkerboard.width = tile * 2;
+  checkerboard.height = tile * 2;
+  const context = checkerboard.getContext('2d');
+  context.fillStyle = '#d000d0';
+  context.fillRect(0, 0, tile * 2, tile * 2);
+  context.fillStyle = '#181818';
+  context.fillRect(0, 0, tile, tile);
+  context.fillRect(tile, tile, tile, tile);
+  return checkerboard;
 }
 
 /** The table the server sends before a keyframe: `[0x41, count]` then index, length, characters. */

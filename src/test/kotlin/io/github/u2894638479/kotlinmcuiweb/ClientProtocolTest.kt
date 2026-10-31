@@ -57,9 +57,9 @@ class ClientProtocolTest {
         val cases = listOf(
             strideCase("FLUSH", Op.FLUSH, 1),
             strideCase("QUAD untextured", Op.QUAD, 10, 9 to Op.NO_ASSET),
-            strideCase("QUAD textured", Op.QUAD, 14, 9 to 7),
+            strideCase("QUAD textured", Op.QUAD, 16, 9 to 7),
             strideCase("TRIANGLES flat", Op.TRIANGLES, 13, 1 to 3, 2 to 0),
-            strideCase("TRIANGLES textured", Op.TRIANGLES, 19, 1 to 3, 2 to 1),
+            strideCase("TRIANGLES textured", Op.TRIANGLES, 21, 1 to 3, 2 to 1),
             strideCase("CLIP_PUSH", Op.CLIP_PUSH, 5),
             strideCase("CLIP_POP", Op.CLIP_POP, 1),
             strideCase("TRANSFORM_PUSH", Op.TRANSFORM_PUSH, 10),

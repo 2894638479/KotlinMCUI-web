@@ -15,15 +15,26 @@ package io.github.u2894638479.kotlinmcuiweb
  * records ([QUAD] with and without a texture, and [TRIANGLES]) carry their own shape in the first
  * words of the payload. The recorder, the report, the SVG writer and the client all walk a frame
  * through the same function.
+ *
+ * A textured record carries the image's nominal size for **this draw**, as two floats after its
+ * texture coordinates. The same asset id can therefore appear with different nominal sizes in one
+ * frame; the client scales the UV rectangle from that nominal size to whatever pixels it actually
+ * has (the loaded image or its missing-texture checkerboard).
  */
 internal object Op {
     /** Frame end: everything before it belongs to the frame, and the client swaps buffers here. */
     const val FLUSH = 0
 
-    /** `[op, x0, y0, x1, y1, lt, rt, lb, rb, asset]` plus `[u0, v0, u1, v1]` when [asset] is not -1. */
+    /**
+     * `[op, x0, y0, x1, y1, lt, rt, lb, rb, asset]` plus `[u0, v0, u1, v1, nominalW, nominalH]`
+     * when [asset] is not [NO_ASSET].
+     */
     const val QUAD = 1
 
-    /** `[op, vertices, textured, asset]` then `vertices * (2|4)` coordinates then `vertices` colours. */
+    /**
+     * `[op, vertices, textured, asset]` then `vertices * (2|4)` coordinates then `vertices` colours.
+     * A textured record appends `[nominalW, nominalH]` after the colours.
+     */
     const val TRIANGLES = 2
 
     /** `[op, l, t, r, b]`; nested clips intersect, and the client keeps a stack. */
@@ -66,10 +77,11 @@ internal object Op {
 
     /** The words a record occupies, its opcode included. */
     fun strideAt(words: IntArray, at: Int): Int = when (words[at]) {
-        QUAD -> if (words[at + 9] == NO_ASSET) 10 else 14
+        QUAD -> if (words[at + 9] == NO_ASSET) 10 else 16
         TRIANGLES -> {
             val vertices = words[at + 1]
-            4 + vertices * (if (words[at + 2] != 0) 4 else 2) + vertices
+            val textured = words[at + 2] != 0
+            4 + vertices * (if (textured) 4 else 2) + vertices + (if (textured) 2 else 0)
         }
         CLIP_PUSH -> 5
         TRANSFORM_PUSH -> 10
