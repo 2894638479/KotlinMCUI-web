@@ -288,6 +288,10 @@ class SecondRootTest {
         WebTestRuntime.install()
 
         val root = DslRoot(WebInput, Recorder, WebScreenFactory, WebUtils)
+        // A root has no implicit unit scale: this case renders without a surface, so it says 1.0. The
+        // factory-built overlay screen belongs to the backend root, so that root is configured too.
+        root.scale = 1.0
+        WebBackend.root.scale = 1.0
         val store = DslDataStore(WebUtils, root, "colour-page-on-its-own-root", {}, { TestColorPage() })
         root.children.collect(store.dslScreen)
 
@@ -338,19 +342,24 @@ class SecondRootTest {
         rootA.children.collect(boxA)
         rootB.children.collect(boxB)
 
-        // A real surface, or the root rect is 0x0 and the pointer is nowhere.
-        Recorder.surfaceWidth = 800
-        Recorder.surfaceHeight = 600
+        // A real surface, or the root rect is 0x0 and the pointer is nowhere. The scale is what the
+        // web backend derives for that surface; a root has no implicit one any more.
+        val width = 800
+        val height = 600
+        val scale = WebScale.of(width, height)
+        // The factory-built overlay screen is bound to the backend root; configure it explicitly too.
+        WebBackend.root.scale = scale
         WebInput.mouse = Position(10.px, 10.px)
 
-        // The backend's own frame, inlined: write the rect first, then render, then flush.
+        // The backend's own frame, inlined: write the rect and the scale first, then render, then flush.
         Recorder.beginFrame()
         rootA.rect.apply {
             left = 0.px
             top = 0.px
-            right = Recorder.surfaceWidth.px
-            bottom = Recorder.surfaceHeight.px
+            right = width.px
+            bottom = height.px
         }
+        rootA.scale = scale
         context(Recorder, Unit, WebInput.mouse) { rootA.component.render() }
         context(Unit) { Recorder.flush() }
 
@@ -358,9 +367,10 @@ class SecondRootTest {
         rootB.rect.apply {
             left = 0.px
             top = 0.px
-            right = Recorder.surfaceWidth.px
-            bottom = Recorder.surfaceHeight.px
+            right = width.px
+            bottom = height.px
         }
+        rootB.scale = scale
         context(Recorder, Unit, WebInput.mouse) { rootB.component.render() }
         context(Unit) { Recorder.flush() }
 

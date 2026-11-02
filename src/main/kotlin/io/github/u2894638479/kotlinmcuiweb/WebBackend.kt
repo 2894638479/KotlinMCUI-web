@@ -133,14 +133,17 @@ object WebBackend {
     internal fun frame(width: Int, height: Int) {
         WebUtils.sweepLocalImages()
         Recorder.beginFrame()
-        Recorder.surfaceWidth = width
-        Recorder.surfaceHeight = height
+        // Both facts belong to the output, and the render pass reads them: the rect is the output
+        // target in its own pixels, and the scale is the DSL baseline for those same pixels. They are
+        // written here, before the tree is built, because a page built against a stale rect or an
+        // unset scale would lay out against something that is not the surface it is about to draw on.
         root.rect.apply {
             left = 0.px
             top = 0.px
             right = width.px
             bottom = height.px
         }
+        root.scale = WebScale.of(width, height)
         context(Recorder, Unit, WebInput.mouse) { root.component.render() }
         context(Unit) { Recorder.flush() }
     }

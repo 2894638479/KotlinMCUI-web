@@ -88,11 +88,6 @@ internal object Recorder : DslRootRenderer<Unit> {
     /** How many distinct assets the table holds. */
     val assetCount: Int get() = assets.size
 
-    internal var surfaceWidth = 0
-    internal var surfaceHeight = 0
-
-    override val guiScale: Double get() = WebScale.of(surfaceWidth, surfaceHeight)
-
     private val assets = HashMap<String, Int>()
     private val raw = IntArray(4)
     private val uvRaw = IntArray(4)

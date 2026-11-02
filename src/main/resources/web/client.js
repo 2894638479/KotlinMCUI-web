@@ -1484,16 +1484,83 @@ function modifiers(event) {
   return bits;
 }
 
+/**
+ * The pointer position in output-target pixels.
+ *
+ * The canvas backing store is the output target the server lays out against, and it is not always
+ * `dpr` times the CSS size: `resizeCanvas` floors the size and enforces a minimum, and CSS may scale
+ * the element independently. So each axis is mapped by the ratio that actually exists between this
+ * canvas's backing pixels and its displayed rectangle - not by the nominal device pixel ratio, and
+ * not with a single ratio for both axes. Fractional results are kept: the server's positions and
+ * rectangles are fractional output pixels, and rounding here would make hit testing disagree with
+ * drawing.
+ *
+ * A zero or unusable displayed rectangle has no defined mapping. Returning null makes the caller drop
+ * the event rather than send a coordinate derived from a made-up ratio (and never a NaN).
+ */
 function position(event) {
+  if (!(canvas.width > 0) || !(canvas.height > 0)) return null;
   const bounds = canvas.getBoundingClientRect();
-  return [
-    Math.round((event.clientX - bounds.left) * dpr),
-    Math.round((event.clientY - bounds.top) * dpr),
-  ];
+  if (!Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) return null;
+  if (!(bounds.width > 0) || !(bounds.height > 0)) return null;
+  const x = (event.clientX - bounds.left) * (canvas.width / bounds.width);
+  const y = (event.clientY - bounds.top) * (canvas.height / bounds.height);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return [x, y];
 }
 
 function wake() {
   asking = true;
+}
+
+// The buttons the server accepted a press for. A press whose coordinates cannot be mapped never
+// reaches the server, so it must not produce a release either; a press that did reach it must still
+// be released if the canvas is resized or hidden before pointerup.
+const heldButtons = new Set();
+let capturedPointer = null;
+
+function endPointerCapture(pointerId) {
+  if (capturedPointer === null) return;
+  try {
+    if (canvas.hasPointerCapture && canvas.hasPointerCapture(pointerId)) {
+      canvas.releasePointerCapture(pointerId);
+    }
+  } catch (error) {
+    // Capture may already be gone (a cancelled pointer or a detached element); clearing our own
+    // record is still the right cleanup, and there is nothing left to release.
+  }
+  capturedPointer = null;
+}
+
+function releaseButton(button, event) {
+  if (!heldButtons.delete(button)) return false;
+  send('button ' + button + ' up ' + modifiers(event));
+  return true;
+}
+
+/**
+ * End a pointer gesture, releasing every button the server still thinks is held.
+ *
+ * A pointerup or pointercancel can arrive after `position()` has lost its mapping - the canvas may
+ * have been resized to zero or hidden while the button was down. Dropping that event would leave the
+ * server's held-button state stuck forever, so the release is always delivered. No new coordinate is
+ * invented: a mapped move is sent when one exists, otherwise the server keeps the last valid
+ * position. All is used for cancels and lost capture, where no particular button is current.
+ */
+function endPointer(event, all, sendMove) {
+  const point = sendMove ? position(event) : null;
+  if (point !== null) send('move ' + point[0] + ' ' + point[1]);
+  let released = false;
+  if (all || event.button === undefined || event.button < 0) {
+    for (const button of [...heldButtons]) released = releaseButton(button, event) || released;
+  } else {
+    released = releaseButton(event.button, event);
+  }
+  if (heldButtons.size === 0) endPointerCapture(event.pointerId);
+  if (point !== null || released) {
+    event.preventDefault();
+    wake();
+  }
 }
 
 // ---- assets -----------------------------------------------------------------------------------
@@ -1583,27 +1650,32 @@ function isAffine(m) {
 }
 
 canvas.addEventListener('pointermove', (event) => {
-  const [x, y] = position(event);
-  send('move ' + x + ' ' + y);
+  const point = position(event);
+  if (point === null) return;
+  send('move ' + point[0] + ' ' + point[1]);
   wake();
 });
 
 canvas.addEventListener('pointerdown', (event) => {
-  const [x, y] = position(event);
-  send('move ' + x + ' ' + y);
+  const point = position(event);
+  if (point === null) return;
+  send('move ' + point[0] + ' ' + point[1]);
   send('button ' + event.button + ' down ' + modifiers(event));
-  canvas.setPointerCapture(event.pointerId);
+  heldButtons.add(event.button);
+  capturedPointer = event.pointerId;
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch (error) {
+    // A capture that the browser refuses is not a reason to drop a press the server accepted; the
+    // matching pointerup will still be delivered to the canvas' own listener in the normal case.
+  }
   event.preventDefault();
   wake();
 });
 
-canvas.addEventListener('pointerup', (event) => {
-  const [x, y] = position(event);
-  send('move ' + x + ' ' + y);
-  send('button ' + event.button + ' up ' + modifiers(event));
-  event.preventDefault();
-  wake();
-});
+canvas.addEventListener('pointerup', (event) => endPointer(event, false, true));
+canvas.addEventListener('pointercancel', (event) => endPointer(event, true, false));
+canvas.addEventListener('lostpointercapture', (event) => endPointer(event, true, false));
 
 canvas.addEventListener('wheel', (event) => {
   // The wheel's deltas come in pixels, lines or pages depending on the browser and the device, so

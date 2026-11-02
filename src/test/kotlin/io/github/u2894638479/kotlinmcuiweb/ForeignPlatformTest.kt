@@ -67,8 +67,6 @@ class ForeignPlatformTest {
         assertEquals(ForeignUtils, dslUtils, "the process utils should belong to the first publisher")
 
         WebBackend.create("mine") { TestLayoutPage() }.show()
-        Recorder.surfaceWidth = 800
-        Recorder.surfaceHeight = 600
         WebBackend.frame(800, 600)
 
         assertTrue(Recorder.size > 0, "the production frame path drew nothing from this backend's own page")

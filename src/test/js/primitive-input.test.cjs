@@ -441,12 +441,33 @@ class FakeCanvas extends Bitmap {
     this.state = state;
     this.style = {};
     this.context = new FakeContext(this, state);
+    this.listeners = {};
+    // Where CSS puts and sizes the element. Null means "derive it from the inline style", which is
+    // what a real browser does when only `canvas.style.width/height` were set.
+    this.bounds = null;
+    this.blobs = [];
+    this.pointerCaptures = new Set();
   }
   getContext() { return this.context; }
-  getBoundingClientRect() { return { left: 0, top: 0 }; }
-  addEventListener() {}
-  setPointerCapture() {}
-  toBlob() {}
+  getBoundingClientRect() {
+    if (this.bounds !== null) return this.bounds;
+    const width = parseFloat(this.style.width);
+    const height = parseFloat(this.style.height);
+    return {
+      left: 0,
+      top: 0,
+      width: Number.isFinite(width) ? width : this.width,
+      height: Number.isFinite(height) ? height : this.height,
+    };
+  }
+  addEventListener(type, listener) {
+    (this.listeners[type] = this.listeners[type] || []).push(listener);
+  }
+  setPointerCapture(pointerId) { this.pointerCaptures.add(pointerId); }
+  releasePointerCapture(pointerId) { this.pointerCaptures.delete(pointerId); }
+  hasPointerCapture(pointerId) { return this.pointerCaptures.has(pointerId); }
+  /** Records the backing size at capture time; the client's `capture` path calls this. */
+  toBlob() { this.blobs.push([this.width, this.height]); }
 }
 
 class FakeImage extends Bitmap {
@@ -524,7 +545,10 @@ function createClient(options = {}) {
     devicePixelRatio: 1,
     innerWidth: 640,
     innerHeight: 480,
-    addEventListener() {},
+    listeners: {},
+    addEventListener(type, listener) {
+      (this.listeners[type] = this.listeners[type] || []).push(listener);
+    },
   };
   const sandbox = {
     console,
@@ -552,6 +576,8 @@ function createClient(options = {}) {
     `${SOURCE}
 ;globalThis.__primitiveTest = {
   defineAsset, imageOf, paint, strideAt, setFrame(value) { frame = value; },
+  position, resizeCanvas, window, canvas, socket: () => socket,
+  setPainted(value) { painted = value; },
   images, assets,
   reset(outer) {
     assets.length = 0;
@@ -878,6 +904,208 @@ function assertPixel(actual, expected, message) {
     );
   }
 }
+
+// ---- output coordinates, resize and capture ---------------------------------------------------
+
+test('pointer positions map CSS coordinates through the actual backing-to-CSS ratio', () => {
+  const { api, screen } = createClient();
+  // Backing 800x600 displayed at 400x300. The nominal dpr is deliberately wrong: the mapping must
+  // use what the canvas actually is, not what the device claims.
+  screen.width = 800;
+  screen.height = 600;
+  screen.bounds = { left: 100, top: 50, width: 400, height: 300 };
+  api.window.devicePixelRatio = 3;
+
+  assert.deepEqual([...api.position({ clientX: 200, clientY: 125 })], [200, 150]);
+  // Fractional CSS coordinates stay fractional; rounding here would disagree with the drawing.
+  assert.deepEqual([...api.position({ clientX: 200.25, clientY: 125.5 })], [200.5, 151]);
+});
+
+test('pointer positions use a separate ratio for X and Y when the target is non-uniform', () => {
+  const { api, screen } = createClient();
+  screen.width = 800;
+  screen.height = 600;
+  screen.bounds = { left: 10, top: 20, width: 300, height: 400 };
+
+  assert.deepEqual([...api.position({ clientX: 310, clientY: 220 })], [800, 300]);
+  assert.deepEqual(
+    [...api.position({ clientX: 100.5, clientY: 70.25 })],
+    [90.5 * (800 / 300), 50.25 * (600 / 400)],
+  );
+});
+
+test('a zero or unusable displayed rectangle drops the event instead of sending a made-up position', () => {
+  const { api, screen } = createClient();
+  const invalid = [
+    { left: 0, top: 0, width: 0, height: 480 },
+    { left: 0, top: 0, width: 640, height: 0 },
+    { left: 0, top: 0, width: Number.NaN, height: 480 },
+    { left: 0, top: 0, width: 640, height: Number.POSITIVE_INFINITY },
+  ];
+  for (const bounds of invalid) {
+    screen.bounds = bounds;
+    assert.equal(api.position({ clientX: 10, clientY: 10 }), null, `bounds ${JSON.stringify(bounds)}`);
+  }
+
+  screen.width = 0;
+  screen.height = 480;
+  screen.bounds = { left: 0, top: 0, width: 640, height: 480 };
+  assert.equal(api.position({ clientX: 10, clientY: 10 }), null, 'a zero backing width has no mapping');
+
+  screen.width = 640;
+  screen.bounds = { left: 0, top: 0, width: 0, height: 480 };
+  api.socket().sent.length = 0;
+  screen.listeners.pointermove[0]({ clientX: 10, clientY: 10 });
+  screen.listeners.pointerdown[0]({ clientX: 10, clientY: 10, button: 0, pointerId: 1 });
+  assert.deepEqual(api.socket().sent, [], 'an undisplayable canvas still produced input events');
+});
+
+test('a valid press is released after the canvas becomes unmappable', () => {
+  const { api, screen } = createClient();
+  const invalid = [
+    { left: 0, top: 0, width: 0, height: 480 },
+    { left: 0, top: 0, width: 640, height: 0 },
+    { left: 0, top: 0, width: Number.NaN, height: 480 },
+    { left: 0, top: 0, width: 640, height: Number.POSITIVE_INFINITY },
+  ];
+  for (const bounds of invalid) {
+    screen.width = 640;
+    screen.height = 480;
+    screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+    api.socket().sent.length = 0;
+
+    screen.listeners.pointerdown[0]({
+      clientX: 10.5, clientY: 20.25, button: 0, pointerId: 7, preventDefault() {},
+    });
+    assert.deepEqual(api.socket().sent, ['move 21 40.5', 'button 0 down 0']);
+    assert.ok(screen.hasPointerCapture(7), 'a valid press did not capture the pointer');
+
+    // The canvas can resize to zero or lose its display between press and release. Moving there has
+    // no defined mapping, so no move may be invented; the release still has to arrive.
+    screen.bounds = bounds;
+    api.socket().sent.length = 0;
+    screen.listeners.pointermove[0]({ clientX: 50, clientY: 50 });
+    assert.deepEqual(api.socket().sent, [], `an invalid move escaped for bounds ${JSON.stringify(bounds)}`);
+
+    screen.listeners.pointerup[0]({
+      clientX: 50, clientY: 50, button: 0, pointerId: 7, preventDefault() {},
+    });
+    assert.deepEqual(api.socket().sent, ['button 0 up 0'],
+      `the held button was not released for bounds ${JSON.stringify(bounds)}`);
+    assert.equal(screen.hasPointerCapture(7), false, 'pointer capture survived the release');
+  }
+});
+
+test('pointercancel releases a held button and its capture without a coordinate', () => {
+  const { api, screen } = createClient();
+  screen.width = 640;
+  screen.height = 480;
+  screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+  api.socket().sent.length = 0;
+
+  screen.listeners.pointerdown[0]({
+    clientX: 10.5, clientY: 20.25, button: 0, pointerId: 7, preventDefault() {},
+  });
+  assert.deepEqual(api.socket().sent, ['move 21 40.5', 'button 0 down 0']);
+  api.socket().sent.length = 0;
+
+  screen.listeners.pointercancel[0]({ pointerId: 7, button: -1, preventDefault() {} });
+  assert.deepEqual(api.socket().sent, ['button 0 up 0']);
+  assert.equal(screen.hasPointerCapture(7), false, 'a cancelled pointer kept its capture');
+  // The browser also reports the capture loss after cancellation; that must not release twice.
+  screen.listeners.lostpointercapture[0]({ pointerId: 7, button: -1, preventDefault() {} });
+  assert.deepEqual(api.socket().sent, ['button 0 up 0']);
+});
+
+test('the normal pointer path sends the mapped position unchanged', () => {
+  const { api, screen } = createClient();
+  screen.width = 640;
+  screen.height = 480;
+  screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+  api.socket().sent.length = 0;
+
+  screen.listeners.pointermove[0]({ clientX: 10.5, clientY: 20.25 });
+  assert.deepEqual(api.socket().sent, ['move 21 40.5']);
+});
+
+test('a mapped input position addresses the same output pixel in drawing and clipping', () => {
+  const { api, screen } = createClient();
+  screen.width = 640;
+  screen.height = 480;
+  screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+
+  // Input maps CSS (10.5, 20.25) to output (21, 40.5). That fractional output coordinate is then
+  // used unchanged as the drawable's rect and its clip, so the three layers agree on one space.
+  const point = [...api.position({ clientX: 10.5, clientY: 20.25 })];
+  assert.deepEqual(point, [21, 40.5]);
+  const rect = [point[0], point[1], point[0] + 20, point[1] + 20];
+  api.setFrame(frameOf(
+    clipPushFrame(rect),
+    colourQuadFrame({ rect }),
+    CLIP_POP_FRAME,
+  ));
+  api.paint();
+
+  assertPixel(screen.pixel(22, 42), [255, 255, 255, 255], 'the draw at the mapped position missed');
+  assert.deepEqual(screen.pixel(20, 39), [0, 0, 0, 0], 'the clip drew outside the mapped position');
+});
+
+test('resize floors the backing size, keeps the CSS size, and reports the backing pixels', () => {
+  const { api, screen } = createClient();
+  api.window.innerWidth = 100;
+  api.window.innerHeight = 100;
+  api.window.devicePixelRatio = 2;
+  api.socket().sent.length = 0;
+
+  api.window.listeners.resize[0]();
+
+  // 100 CSS px at dpr 2 is 200 backing px, below both minima, so the backing store is 320x240 while
+  // CSS stays 100x100. That is exactly the case a blind `clientX * dpr` mapping gets wrong.
+  assert.equal(screen.width, 320);
+  assert.equal(screen.height, 240);
+  assert.equal(screen.style.width, '100px');
+  assert.equal(screen.style.height, '100px');
+  assert.ok(api.socket().sent.includes('resize 320 240'), `sent: ${api.socket().sent}`);
+  assert.deepEqual([...api.position({ clientX: 50, clientY: 50 })], [160, 120]);
+});
+
+test('fractional device ratios use the floored backing size rather than a rounded one', () => {
+  const { api, screen } = createClient();
+  api.window.innerWidth = 641;
+  api.window.innerHeight = 361;
+  api.window.devicePixelRatio = 1.5;
+  api.socket().sent.length = 0;
+
+  api.window.listeners.resize[0]();
+
+  assert.equal(screen.width, 961, '641 * 1.5 floored');
+  assert.equal(screen.height, 541, '361 * 1.5 floored');
+  assert.ok(api.socket().sent.includes('resize 961 541'), `sent: ${api.socket().sent}`);
+  assert.deepEqual(
+    [...api.position({ clientX: 100.25, clientY: 50.5 })],
+    [100.25 * (961 / 641), 50.5 * (541 / 361)],
+  );
+});
+
+test('a capture photographs the same backing pixels the resize frame was recorded at', () => {
+  const { api, screen } = createClient();
+  api.window.innerWidth = 500;
+  api.window.innerHeight = 400;
+  api.window.devicePixelRatio = 2;
+  api.socket().sent.length = 0;
+  api.window.listeners.resize[0]();
+
+  const resize = api.socket().sent.find((message) => message.startsWith('resize '));
+  assert.ok(resize, `no resize was sent: ${api.socket().sent}`);
+  const [width, height] = resize.split(' ').slice(1).map(Number);
+  assert.deepEqual([width, height], [1000, 800]);
+
+  api.setPainted(true);
+  api.socket().onmessage({ data: 'capture' });
+  const blob = screen.blobs[screen.blobs.length - 1];
+  assert.deepEqual(blob, [width, height], 'the capture and the recorded frame disagree on size');
+  assert.deepEqual(blob, [screen.width, screen.height]);
+});
 
 // ---- assets and sampling ----------------------------------------------------------------------
 
