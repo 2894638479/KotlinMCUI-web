@@ -42,8 +42,7 @@ X、Y 各用各自的实际比例，因此非等比缩放、分数 DPR、下限�
 可用 backing 时，移动和按下被丢弃，不会发送用编造比例算出的坐标，也不会发送 NaN。
 
 已经到达服务端的按下仍必须收到释放：画布在按住期间 resize 到零或隐藏后，`pointerup` 的坐标可能
-无法映射，此时不发送新的 move，也不编造坐标，只发送对应的 `button ... up`，服务端沿用最后一次有效
-位置。指针捕获随之释放；`pointercancel` 和 `lostpointercapture` 走同一条清理路径，避免按键卡住。
+无法映射时，活动身份提交 `PointerEvent.Cancel`，释放该触点自己的表面捕获；不编造位置或可激活的 Up。完整输入线协议见 [指针输入](pointer-input.md)。
 
 输入、绘制和裁剪因此共用同一坐标空间：映射后的坐标直接进入 `WebInput.mouse`，布局写出的图元坐标
 和 `withScissor` 的矩形也是同一单位。`withTransform` 继续只负责几何映射和命中测试的逆变换，后端不

@@ -164,6 +164,7 @@ function connect() {
     stillUntil = performance.now() + IDLE_MILLIS;
   };
   socket.onclose = () => {
+    cancelPointers(false);
     status.textContent = 'disconnected, retrying';
     setTimeout(connect, 500);
   };
@@ -1513,54 +1514,77 @@ function wake() {
   asking = true;
 }
 
-// The buttons the server accepted a press for. A press whose coordinates cannot be mapped never
-// reaches the server, so it must not produce a release either; a press that did reach it must still
-// be released if the canvas is resized or hidden before pointerup.
-const heldButtons = new Set();
-let capturedPointer = null;
+// A record is per native identity; different contacts never share buttons or surface capture.
+const pointers = new Map();
+const domButtons = [0, 2, 1, 3, 4, 5, 6];
 
-function endPointerCapture(pointerId) {
-  if (capturedPointer === null) return;
+function releaseCapture(id, state) {
+  state.captured = false;
   try {
-    if (canvas.hasPointerCapture && canvas.hasPointerCapture(pointerId)) {
-      canvas.releasePointerCapture(pointerId);
+    if (canvas.hasPointerCapture && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  } catch (_) { /* The native surface may already have gone away. */ }
+}
+
+function cancelPointer(id, notify = true) {
+  const state = pointers.get(id);
+  if (!state) return;
+  pointers.delete(id);
+  if (notify) send('pointer cancel ' + (id >>> 0));
+  releaseCapture(id, state);
+}
+
+function cancelPointers(notify = true) {
+  for (const id of [...pointers.keys()]) cancelPointer(id, notify);
+}
+
+function pointerSample(event, phase) {
+  const id = event.pointerId;
+  if (!Number.isSafeInteger(id) || id < -0x80000000 || id > 0xffffffff) return;
+  const point = position(event);
+  if (point === null) { cancelPointer(id); return; }
+  const kind = event.pointerType;
+  if (kind !== 'mouse' && kind !== 'touch' && kind !== 'pen') return;
+  const mask = event.buttons;
+  if (!Number.isInteger(mask) || mask < 0 || mask > 127) { cancelPointer(id); return; }
+  let state = pointers.get(id);
+  if (state && state.kind !== kind) { cancelPointer(id); state = null; }
+  if (!state) {
+    // Pen hover is observed before contact when the browser exposes it. A contact-first pen stays
+    // non-hovering for that sequence; a later real hover begins a fresh idle sequence.
+    state = { kind, buttons: 0, canHover: kind === 'mouse' || kind === 'pen' && mask === 0, captured: false };
+    pointers.set(id, state);
+  }
+  const old = state.buttons;
+  const pressure = Number.isFinite(event.pressure) ? event.pressure : (mask ? 0.5 : 0);
+  const emit = (type, button, buttons) => send('pointer ' + type + ' ' + (id >>> 0) + ' ' + kind + ' ' +
+    point[0] + ' ' + point[1] + ' ' + button + ' ' + buttons + ' ' + (state.canHover ? 1 : 0) + ' ' +
+    (buttons ? pressure : 0) + ' ' + modifiers(event));
+  // DOM pointerdown/up describe the first/last button only. Intermediate changes arrive as moves.
+  for (let bit = 0; bit < domButtons.length; bit++) {
+    const flag = 1 << bit;
+    if ((old & flag) && !(mask & flag)) {
+      state.buttons &= ~flag;
+      emit('up', domButtons[bit], state.buttons);
     }
-  } catch (error) {
-    // Capture may already be gone (a cancelled pointer or a detached element); clearing our own
-    // record is still the right cleanup, and there is nothing left to release.
   }
-  capturedPointer = null;
-}
-
-function releaseButton(button, event) {
-  if (!heldButtons.delete(button)) return false;
-  send('button ' + button + ' up ' + modifiers(event));
-  return true;
-}
-
-/**
- * End a pointer gesture, releasing every button the server still thinks is held.
- *
- * A pointerup or pointercancel can arrive after `position()` has lost its mapping - the canvas may
- * have been resized to zero or hidden while the button was down. Dropping that event would leave the
- * server's held-button state stuck forever, so the release is always delivered. No new coordinate is
- * invented: a mapped move is sent when one exists, otherwise the server keeps the last valid
- * position. All is used for cancels and lost capture, where no particular button is current.
- */
-function endPointer(event, all, sendMove) {
-  const point = sendMove ? position(event) : null;
-  if (point !== null) send('move ' + point[0] + ' ' + point[1]);
-  let released = false;
-  if (all || event.button === undefined || event.button < 0) {
-    for (const button of [...heldButtons]) released = releaseButton(button, event) || released;
-  } else {
-    released = releaseButton(event.button, event);
+  for (let bit = 0; bit < domButtons.length; bit++) {
+    const flag = 1 << bit;
+    if (!(old & flag) && (mask & flag)) {
+      state.buttons |= flag;
+      emit('down', domButtons[bit], state.buttons);
+    }
   }
-  if (heldButtons.size === 0) endPointerCapture(event.pointerId);
-  if (point !== null || released) {
-    event.preventDefault();
-    wake();
+  if (phase === 'move' && old === mask) emit('move', -1, mask);
+  if (mask && !state.captured) {
+    try { canvas.setPointerCapture(id); state.captured = true; }
+    catch (_) { cancelPointer(id); }
   }
+  if (!mask && old) {
+    releaseCapture(id, state);
+    if (!state.canHover) pointers.delete(id);
+  }
+  if (mask || old) event.preventDefault();
+  wake();
 }
 
 // ---- assets -----------------------------------------------------------------------------------
@@ -1649,40 +1673,25 @@ function isAffine(m) {
   return m[6] === 0 && m[7] === 0 && m[8] === 1;
 }
 
-canvas.addEventListener('pointermove', (event) => {
-  const point = position(event);
-  if (point === null) return;
-  send('move ' + point[0] + ' ' + point[1]);
-  wake();
+canvas.addEventListener('pointermove', (event) => pointerSample(event, 'move'));
+canvas.addEventListener('pointerdown', (event) => pointerSample(event, 'down'));
+canvas.addEventListener('pointerup', (event) => pointerSample(event, 'up'));
+canvas.addEventListener('pointercancel', (event) => cancelPointer(event.pointerId));
+canvas.addEventListener('lostpointercapture', (event) => {
+  if (pointers.get(event.pointerId)?.captured) cancelPointer(event.pointerId);
 });
-
-canvas.addEventListener('pointerdown', (event) => {
-  const point = position(event);
-  if (point === null) return;
-  send('move ' + point[0] + ' ' + point[1]);
-  send('button ' + event.button + ' down ' + modifiers(event));
-  heldButtons.add(event.button);
-  capturedPointer = event.pointerId;
-  try {
-    canvas.setPointerCapture(event.pointerId);
-  } catch (error) {
-    // A capture that the browser refuses is not a reason to drop a press the server accepted; the
-    // matching pointerup will still be delivered to the canvas' own listener in the normal case.
-  }
-  event.preventDefault();
-  wake();
+canvas.addEventListener('pointerleave', (event) => {
+  if (pointers.has(event.pointerId)) send('pointer leave ' + (event.pointerId >>> 0));
 });
-
-canvas.addEventListener('pointerup', (event) => endPointer(event, false, true));
-canvas.addEventListener('pointercancel', (event) => endPointer(event, true, false));
-canvas.addEventListener('lostpointercapture', (event) => endPointer(event, true, false));
 
 canvas.addEventListener('wheel', (event) => {
   // The wheel's deltas come in pixels, lines or pages depending on the browser and the device, so
   // they are normalised to pixels here; the server turns pixels into notches, which is the unit the
   // framework's scroll is in.
   const unit = event.deltaMode === 1 ? LINE_PIXELS : event.deltaMode === 2 ? PAGE_PIXELS : 1;
-  send('wheel ' + Math.round(event.deltaX * unit) + ' ' + Math.round(event.deltaY * unit) + ' ' + modifiers(event));
+  const point = position(event);
+  if (point === null) return;
+  send('wheel ' + point[0] + ' ' + point[1] + ' ' + Math.round(event.deltaX * unit) + ' ' + Math.round(event.deltaY * unit) + ' ' + modifiers(event));
   event.preventDefault();
   wake();
 }, { passive: false });
@@ -1691,7 +1700,7 @@ canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
 window.addEventListener('keydown', (event) => {
   send('key ' + event.code + ' down ' + modifiers(event));
-  if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+  if (!event.isComposing && !composing && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
     send('char ' + event.key.codePointAt(0));
   }
   event.preventDefault();
@@ -1704,7 +1713,18 @@ window.addEventListener('keyup', (event) => {
   wake();
 });
 
-window.addEventListener('blur', () => send('blur'));
+let composing = false;
+window.addEventListener('compositionstart', () => { composing = true; send('compositionstart'); });
+window.addEventListener('compositionupdate', (event) => {
+  if (composing) send('preedit ' + encodeURIComponent(event.data || ''));
+});
+window.addEventListener('compositionend', (event) => {
+  if (!composing) return;
+  composing = false;
+  send('compositionend ' + encodeURIComponent(event.data || ''));
+  wake();
+});
+window.addEventListener('blur', () => { composing = false; cancelPointers(); send('blur'); });
 
 window.addEventListener('resize', () => {
   resizeCanvas();

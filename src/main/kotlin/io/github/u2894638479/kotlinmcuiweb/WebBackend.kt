@@ -144,7 +144,7 @@ object WebBackend {
             bottom = height.px
         }
         root.scale = WebScale.of(width, height)
-        context(Recorder, Unit, WebInput.mouse) { root.component.render() }
+        context(Recorder, Unit) { root.component.render() }
         context(Unit) { Recorder.flush() }
     }
 

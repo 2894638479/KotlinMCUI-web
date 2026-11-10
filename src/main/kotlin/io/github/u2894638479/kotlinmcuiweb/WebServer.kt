@@ -2,7 +2,9 @@ package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.input.Key
 import io.github.u2894638479.kotlinmcui.input.KeyModifiers
-import io.github.u2894638479.kotlinmcui.input.MouseButton
+import io.github.u2894638479.kotlinmcui.input.*
+import io.github.u2894638479.kotlinmcui.math.Position
+import io.github.u2894638479.kotlinmcui.math.px
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import java.io.BufferedOutputStream
 import java.io.InputStream
@@ -45,9 +47,6 @@ internal class WebServer(
 
     /** Connections currently served; a teardown reads it to prove the session it closed is gone. */
     internal val sessionCount: Int get() = sessions.size
-
-    /** Names a viewer in a log line; with one viewer per root it also names the root. */
-    private val nextSessionId = java.util.concurrent.atomic.AtomicInteger()
 
     private val renderPending = AtomicBoolean(false)
 
@@ -222,6 +221,7 @@ internal class WebServer(
             session.serve()
         } finally {
             sessions -= session
+            WebUtils.frameExecutor.execute { WebInput.blur(session.id) }
             dslLogger.info("web server: a client left (${sessions.size} connected)")
         }
     }
@@ -316,8 +316,8 @@ internal class WebServer(
         requestFrame()
     }
 
-    private fun input(command: String) {
-        WebUtils.frameExecutor.execute { dispatch(command) }
+    private fun input(command: String, connection: Int) {
+        WebUtils.frameExecutor.execute { dispatch(command, connection) }
         requestFrame()
     }
 
@@ -328,47 +328,67 @@ internal class WebServer(
      * here, where the framework's own key and button constants live - the client is a browser script
      * and cannot know them.
      */
-    private fun dispatch(command: String) {
+    private fun dispatch(command: String, connection: Int) {
         val parts = command.split(' ')
         when (parts.firstOrNull()) {
-            "move" -> WebInput.moved(number(parts, 1).toFloat(), number(parts, 2).toFloat())
-            "button" -> {
-                val button = buttonOf(parts.getOrNull(1)?.toIntOrNull()) ?: return
-                val modifiers = modifiersOf(parts.getOrNull(3)?.toIntOrNull())
-                WebInput.modifiers(modifiers)
-                if (parts.getOrNull(2) == "down") WebInput.pressed(button) else WebInput.released(button)
+            "pointer" -> {
+                val nativeId = parts.getOrNull(2)?.toLongOrNull()?.takeIf { it in 0..0xffffffffL } ?: return
+                val id = PointerId((connection.toLong() shl 32) or nativeId)
+                val phase = parts.getOrNull(1)
+                if (phase == "cancel") { WebInput.pointer(PointerEvent.Cancel(id), connection); return }
+                if (phase == "leave") { WebInput.pointer(PointerEvent.Leave(id), connection); return }
+                val kind = when (parts.getOrNull(3)) { "mouse" -> PointerKind.MOUSE; "touch" -> PointerKind.TOUCH; "pen" -> PointerKind.PEN; else -> return }
+                val x = parts.getOrNull(4)?.toDoubleOrNull()?.takeIf { it.isFinite() } ?: return
+                val y = parts.getOrNull(5)?.toDoubleOrNull()?.takeIf { it.isFinite() } ?: return
+                val mask = parts.getOrNull(7)?.toIntOrNull()?.takeIf { it in 0..127 } ?: return
+                val buttons = PointerButton.entries.filterIndexed { index, _ -> mask and (1 shl index) != 0 }.toSet()
+                val canHover = parts.getOrNull(8) == "1"
+                val pressure = parts.getOrNull(9)?.toFloatOrNull() ?: return
+                val modifiers = modifiersOf(parts.getOrNull(10)?.toIntOrNull())
+                val position = Position(x.px, y.px)
+                val event = when (phase) {
+                    "down" -> PointerEvent.Down(id, kind, position, buttonOf(parts.getOrNull(6)?.toIntOrNull()) ?: return, buttons, canHover, modifiers, pressure)
+                    "up" -> PointerEvent.Up(id, kind, position, buttonOf(parts.getOrNull(6)?.toIntOrNull()) ?: return, buttons, canHover, modifiers, pressure)
+                    "move" -> PointerEvent.Move(id, kind, position, buttons, canHover, modifiers, pressure)
+                    else -> return
+                }
+                WebInput.pointer(event, connection)
             }
             "wheel" -> {
-                WebInput.modifiers(modifiersOf(parts.getOrNull(3)?.toIntOrNull()))
-                val horizontal = number(parts, 1)
-                val vertical = number(parts, 2)
+                WebInput.modifiers(modifiersOf(parts.getOrNull(5)?.toIntOrNull()), connection)
+                val position = Position(number(parts, 1).px, number(parts, 2).px)
+                val horizontal = number(parts, 3)
+                val vertical = number(parts, 4)
                 // The framework counts wheel notches upwards - the direction GLFW reports in, which is
                 // why the window backend negates AWT's - so both axes arrive negated here as well.
                 // An event that carries a horizontal delta is horizontal (a trackpad, or a browser that
                 // already swapped the axes for a held shift); otherwise it is a plain vertical wheel,
                 // and the framework routes it to a horizontal scroller itself while shift is down.
                 when {
-                    horizontal != 0.0 -> WebInput.scrolled(-horizontal / WHEEL_STEP, true)
-                    vertical != 0.0 -> WebInput.scrolled(-vertical / WHEEL_STEP, false)
+                    horizontal != 0.0 -> WebInput.scrolled(position, -horizontal / WHEEL_STEP, true)
+                    vertical != 0.0 -> WebInput.scrolled(position, -vertical / WHEEL_STEP, false)
                 }
             }
             "key" -> {
                 val key = keyOf(parts.getOrNull(1) ?: return) ?: return
-                WebInput.modifiers(modifiersOf(parts.getOrNull(3)?.toIntOrNull()))
+                WebInput.modifiers(modifiersOf(parts.getOrNull(3)?.toIntOrNull()), connection)
                 // There is no platform scan code over a socket; the framework's own code is the honest
                 // stand-in, and the components that read it (the game's text box) are not here.
                 val scanCode = key.code
                 if (parts.getOrNull(2) == "down") {
-                    val consumed = WebInput.keyPressed(key, scanCode)
+                    val consumed = WebInput.keyPressed(key, scanCode, connection)
                     // Escape leaves the page when nothing on it wanted the key. It is the only way back
                     // from a page that was entered, and it is the rule the window backend follows too.
                     if (!consumed && key == Key.ESCAPE) WebBackend.pop()
                 } else {
-                    WebInput.keyReleased(key, scanCode)
+                    WebInput.keyReleased(key, scanCode, connection)
                 }
             }
             "char" -> parts.getOrNull(1)?.toIntOrNull()?.let { WebInput.typed(it) }
-            "blur" -> WebInput.blur()
+            "blur" -> WebInput.blur(connection)
+            "compositionstart" -> WebInput.compositionStart(connection)
+            "preedit" -> WebInput.preedit(java.net.URLDecoder.decode(parts.getOrNull(1) ?: "", "UTF-8"), connection)
+            "compositionend" -> WebInput.compositionEnd(java.net.URLDecoder.decode(parts.getOrNull(1) ?: "", "UTF-8"), connection)
             "metrics" -> applyMetrics(parts)
             "lang" -> parts.getOrNull(1)?.let { WebUtils.useLanguage(it) }
             "log" -> dslLogger.warn("web client: " + parts.drop(1).joinToString(" "))
@@ -446,7 +466,7 @@ internal class WebServer(
                         reset()
                         requestFrame()
                     }
-                    "blur" -> input(message.text.trim())
+                    "blur" -> input(message.text.trim(), id)
                     else -> {
                         val parts = message.text.trim().split(' ')
                         when (parts.firstOrNull()) {
@@ -454,7 +474,7 @@ internal class WebServer(
                                 parts.getOrNull(1)?.toIntOrNull() ?: width,
                                 parts.getOrNull(2)?.toIntOrNull() ?: height,
                             )
-                            "move", "button", "wheel", "key", "char", "metrics", "log", "lang" -> input(message.text.trim())
+                            "pointer", "wheel", "key", "char", "compositionstart", "preedit", "compositionend", "metrics", "log", "lang" -> input(message.text.trim(), id)
                         }
                     }
                 }
@@ -462,10 +482,14 @@ internal class WebServer(
         }
     }
 
-    private fun buttonOf(domButton: Int?): MouseButton? = when (domButton) {
-        0 -> MouseButton.entries.getOrNull(0)
-        1 -> MouseButton.entries.getOrNull(2)
-        2 -> MouseButton.entries.getOrNull(1)
+    private fun buttonOf(domButton: Int?): PointerButton? = when (domButton) {
+        0 -> PointerButton.PRIMARY
+        1 -> PointerButton.AUXILIARY
+        2 -> PointerButton.SECONDARY
+        3 -> PointerButton.BUTTON4
+        4 -> PointerButton.BUTTON5
+        5 -> PointerButton.BUTTON6
+        6 -> PointerButton.BUTTON7
         else -> null
     }
 
@@ -514,6 +538,7 @@ internal class WebServer(
     }
 
     internal companion object {
+        private val nextSessionId = java.util.concurrent.atomic.AtomicInteger()
         /** How long a capture waits for a browser to connect before giving up. */
         const val DEFAULT_WAIT_FOR_CLIENT_MILLIS = 30_000L
 

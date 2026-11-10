@@ -130,8 +130,10 @@ class WebServerTest {
             assertTrue(captured is WebServer.Capture.Answered, "the capture did not end with a picture: $captured")
             captured as WebServer.Capture.Answered
             assertContentEquals(png, captured.png, "the client's answer did not reach the server")
-            // One viewer per root, so the outcome has to name the root it photographed.
-            assertEquals(1, captured.session, "the capture did not name the browser it photographed")
+            assertTrue(captured.session > 0, "the capture lost its browser identity")
+            val unanswered = running.capture(answerMillis = 100, waitForClientMillis = 2_000)
+            assertTrue(unanswered is WebServer.Capture.Unanswered)
+            assertEquals(captured.session, unanswered.session, "the same browser changed identity between captures")
         }
     }
 
@@ -176,7 +178,10 @@ class WebServerTest {
 
             assertTrue(result is WebServer.Capture.Unanswered, "expected an unanswered capture, got $result")
             result as WebServer.Capture.Unanswered
-            assertEquals(1, result.session, "the outcome did not name the browser it waited on")
+            assertTrue(result.session > 0, "the outcome lost the browser it waited on")
+            val repeated = running.capture(answerMillis = 100, waitForClientMillis = 2_000)
+            assertTrue(repeated is WebServer.Capture.Unanswered)
+            assertEquals(result.session, repeated.session, "the same browser changed identity between captures")
             assertEquals(300, result.waitedMillis, "the outcome lost the wait it gave up on")
         }
     }
@@ -210,10 +215,10 @@ class WebServerTest {
             client.setTimeout(5_000)
             // The framework asks isKeyDown(LEFT_SHIFT) - the polled half of input - to decide whether a
             // vertical wheel may scroll a horizontal scroller, so the modifier flag has to reach it.
-            client.sendText("wheel 0 -100 1")
+            client.sendText("wheel 10 10 0 -100 1")
             assertTrue(await { WebInput.isKeyDown(Key.LEFT_SHIFT) }, "the shift flag did not reach the polled state")
 
-            client.sendText("wheel 0 -100 0")
+            client.sendText("wheel 10 10 0 -100 0")
             assertTrue(await { !WebInput.isKeyDown(Key.LEFT_SHIFT) }, "the shift key never came up")
         }
     }

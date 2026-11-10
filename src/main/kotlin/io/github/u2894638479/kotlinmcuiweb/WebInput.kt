@@ -1,139 +1,117 @@
 package io.github.u2894638479.kotlinmcuiweb
 
 import io.github.u2894638479.kotlinmcui.backend.DslRootInput
-import io.github.u2894638479.kotlinmcui.backend.DslRuntime
-import io.github.u2894638479.kotlinmcui.input.Key
-import io.github.u2894638479.kotlinmcui.input.KeyModifiers
-import io.github.u2894638479.kotlinmcui.input.MouseButton
+import io.github.u2894638479.kotlinmcui.input.*
+import io.github.u2894638479.kotlinmcui.component.isFocused
+import io.github.u2894638479.kotlinmcui.identity.DslId
 import io.github.u2894638479.kotlinmcui.logger.dslLogger
 import io.github.u2894638479.kotlinmcui.math.Position
 import io.github.u2894638479.kotlinmcui.math.px
 import io.github.u2894638479.kotlinmcui.math.rect.Rect
 import java.nio.file.Path
 
-/**
- * Input for a browser client.
- *
- * The framework reads input two ways, and a browser only supplies one of them: events arrive
- * (a key goes down, a pointer moves) while [isKeyDown], [isMouseDown] and [mouse] are *polled* every
- * frame. So the polled half is derived from the event stream here - the browser has no "is this key
- * down right now" to ask, and asking it per frame over a socket would put a round trip in front of
- * every frame.
- *
- * The one case that half cannot cover on its own is a client that stops sending: a browser window
- * that loses focus never delivers the key-up, and a broken connection never delivers anything at all.
- * Both would leave a key stuck down forever, so [blur] - which the transport calls on focus loss and
- * on disconnect - drops everything that was held.
- *
- * Every entry point is wrapped in [guarded]: a component's handler is user code, and an exception in
- * it must not take the input path down with it. What the framework gets back is "not consumed",
- * which is exactly what it would have got from a component that ignored the event.
- */
+/** Browser samples arrive on the frame executor. Connection ids namespace native pointer ids. */
 internal object WebInput : DslRootInput {
-    override var mouse = Position(0.px, 0.px)
+    private val heldKeys = HashMap<Int, MutableSet<Int>>()
+    private val pointers = LinkedHashMap<PointerId, Int>()
+    private val modifiers = HashMap<Int, KeyModifiers>()
+    private var compositionOwner: Int? = null
+    private var compositionFocus: DslId? = null
+    private var cursor = Position(0.px, 0.px)
 
-    private val heldKeys = HashSet<Int>()
-    private val heldButtons = HashSet<Int>()
-    private var modifiers = KeyModifiers()
-
-    override fun isKeyDown(key: Key) = heldKeys.contains(key.code)
-
-    override fun isMouseDown(mouse: Int) = heldButtons.contains(mouse)
-
-    /** The client positions its own IME box, so nothing is delegated to a platform here. */
+    override fun isKeyDown(key: Key) = heldKeys.values.any { key.code in it }
     override fun setPreeditArea(rect: Rect) = Unit
 
-    /** The modifier state that arrives with each event, as the client last reported it. */
-    fun modifiers(value: KeyModifiers) {
-        modifiers = value
-        // The framework does not only read modifiers from the event context: a horizontal scroller
-        // accepts a *vertical* wheel when `isKeyDown(LEFT_SHIFT)` is true, which is the polled half of
-        // input. A browser reports modifiers as flags on each event rather than as key events that
-        // always arrive, so the flags are what has to keep the polled state honest.
-        hold(Key.LEFT_SHIFT, Key.RIGHT_SHIFT, value.shift)
-        hold(Key.LEFT_CTRL, Key.RIGHT_CTRL, value.ctrl)
-        hold(Key.LEFT_ALT, Key.RIGHT_ALT, value.alt)
-        hold(Key.LEFT_SUPER, Key.RIGHT_SUPER, value.superKey)
+    fun modifiers(value: KeyModifiers, connection: Int) {
+        modifiers[connection] = value
+        hold(connection, Key.LEFT_SHIFT, Key.RIGHT_SHIFT, value.shift)
+        hold(connection, Key.LEFT_CTRL, Key.RIGHT_CTRL, value.ctrl)
+        hold(connection, Key.LEFT_ALT, Key.RIGHT_ALT, value.alt)
+        hold(connection, Key.LEFT_SUPER, Key.RIGHT_SUPER, value.superKey)
+    }
+    private fun hold(connection: Int, left: Key, right: Key, down: Boolean) {
+        val keys = heldKeys.getOrPut(connection) { HashSet() }
+        if (down) keys.add(left.code) else { keys.remove(left.code); keys.remove(right.code) }
     }
 
-    private fun hold(left: Key, right: Key, down: Boolean) {
-        if (down) {
-            heldKeys.add(left.code)
-        } else {
-            heldKeys.remove(left.code)
-            heldKeys.remove(right.code)
-        }
-    }
-
-    fun moved(x: Float, y: Float) {
-        mouse = Position(x.px, y.px)
-        guarded("a cursor move", Unit) { context(mouse) { WebBackend.root.component.mouseMove() } }
-    }
-
-    fun pressed(button: MouseButton): Boolean {
-        heldButtons.add(button.ordinal)
-        return guarded("a mouse press", false) { context(mouse, modifiers) { WebBackend.root.component.mouseDown(button) } }
-    }
-
-    fun released(button: MouseButton): Boolean {
-        heldButtons.remove(button.ordinal)
-        return guarded("a mouse release", false) { context(mouse, modifiers) { WebBackend.root.component.mouseUp(button) } }
-    }
-
-    fun scrolled(amount: Double, horizontal: Boolean) {
-        guarded("a scroll", Unit) {
-            context(mouse) {
-                if (horizontal) WebBackend.root.component.mouseScrollHorizontal(amount) else WebBackend.root.component.mouseScrollVertical(amount)
+    fun pointer(event: PointerEvent, connection: Int): Boolean {
+        when (event) {
+            is PointerEvent.Down -> { pointers[event.id] = connection; cursor = event.position; modifiers(event.modifiers, connection) }
+            is PointerEvent.Move -> { pointers[event.id] = connection; cursor = event.position; modifiers(event.modifiers, connection) }
+            is PointerEvent.Up -> {
+                if (!event.canHover && event.buttons.isEmpty()) pointers.remove(event.id)
+                cursor = event.position
+                modifiers(event.modifiers, connection)
             }
+            is PointerEvent.Cancel -> pointers.remove(event.id)
+            is PointerEvent.Leave -> Unit
+        }
+        return guarded("pointer input", false) { WebBackend.root.dispatchPointer(event) }
+    }
+
+    fun scrolled(position: Position, amount: Double, horizontal: Boolean) {
+        cursor = position
+        guarded("scroll", Unit) {
+            if (horizontal) WebBackend.root.dispatchScrollHorizontal(position, amount)
+            else WebBackend.root.dispatchScrollVertical(position, amount)
         }
     }
-
-    fun keyPressed(key: Key, scanCode: Int): Boolean {
-        heldKeys.add(key.code)
-        return guarded("a key press", false) { context(modifiers) { WebBackend.root.component.keyDown(key, scanCode) } }
+    fun keyPressed(key: Key, scanCode: Int, connection: Int): Boolean {
+        heldKeys.getOrPut(connection) { HashSet() }.add(key.code)
+        return guarded("key press", false) { WebBackend.root.dispatchKeyDown(key, scanCode, modifiers[connection] ?: KeyModifiers()) }
     }
-
-    fun keyReleased(key: Key, scanCode: Int): Boolean {
-        heldKeys.remove(key.code)
-        return guarded("a key release", false) { context(modifiers) { WebBackend.root.component.keyUp(key, scanCode) } }
+    fun keyReleased(key: Key, scanCode: Int, connection: Int): Boolean {
+        heldKeys[connection]?.remove(key.code)
+        return guarded("key release", false) { WebBackend.root.dispatchKeyUp(key, scanCode, modifiers[connection] ?: KeyModifiers()) }
     }
-
-    /**
-     * A typed character, arriving as a code point.
-     *
-     * The framework takes one `Char`, so a character outside the basic plane - which a browser
-     * happily reports as a single code point - has to be split into its surrogate pair and handed
-     * over as two units. Anything else would truncate it to the high surrogate.
-     */
     fun typed(codePoint: Int): Boolean {
-        val units = when {
-            codePoint < 0 || codePoint > MAX_CODE_POINT -> return false
-            Character.isBmpCodePoint(codePoint) -> charArrayOf(codePoint.toChar())
-            else -> charArrayOf(Character.highSurrogate(codePoint), Character.lowSurrogate(codePoint))
-        }
+        if (!Character.isValidCodePoint(codePoint)) return false
         var consumed = false
-        for (unit in units) consumed = guarded("a typed character", false) { WebBackend.root.component.charTyped(unit) } || consumed
+        for (unit in Character.toChars(codePoint))
+            consumed = guarded("typed character", false) { WebBackend.root.dispatchCharTyped(unit) } || consumed
         return consumed
     }
-
+    private fun focusedText(): DslId? = WebBackend.root.component.testHit {
+        it.takeIf { it.focusable && it.isFocused && it.preeditArea != null }?.identity
+    }
+    fun compositionStart(connection: Int) {
+        if (compositionOwner != null) preeditEnd()
+        compositionOwner = connection
+        compositionFocus = focusedText()
+    }
+    private fun preeditEnd() {
+        compositionOwner = null
+        compositionFocus = null
+        guarded("composition end", Unit) { WebBackend.root.dispatchPreedit(PreeditInfo.empty) }
+    }
+    fun compositionEnd(text: String, connection: Int) {
+        if (compositionOwner != connection) return
+        val accept = compositionFocus != null && compositionFocus == focusedText()
+        preeditEnd()
+        if (accept) text.codePoints().forEach { typed(it) }
+    }
+    fun preedit(text: String, connection: Int) {
+        if (compositionOwner != connection || compositionFocus == null || compositionFocus != focusedText()) return
+        val info = if (text.isEmpty()) PreeditInfo.empty else PreeditInfo(
+            listOf(io.github.u2894638479.kotlinmcui.text.CodePoints.Const(text)), 0, text.codePointCount(0, text.length),
+        )
+        guarded("composition", Unit) { WebBackend.root.dispatchPreedit(info) }
+    }
     fun dropped(files: Array<Path>) {
-        guarded("a file drop", Unit) { context(mouse) { WebBackend.root.component.dropFiles(files) } }
+        guarded("file drop", Unit) { WebBackend.root.dispatchDropFiles(cursor, files) }
     }
 
-    /** Focus loss or disconnect: nothing may stay held down. */
-    fun blur() {
-        heldKeys.clear()
-        heldButtons.clear()
-        mouse = Position(0.px, 0.px)
-    }
-
-    private inline fun <T> guarded(what: String, fallback: T, block: () -> T): T =
-        try {
-            block()
-        } catch (throwable: Throwable) {
-            dslLogger.error("web input: $what failed", throwable)
-            fallback
+    /** Cancels identities, never fabricates an activating Up. A disconnected client cannot cancel another. */
+    fun blur(connection: Int? = null) {
+        if (connection == null) { heldKeys.clear(); modifiers.clear() }
+        else { heldKeys.remove(connection); modifiers.remove(connection) }
+        if (compositionOwner != null && (connection == null || compositionOwner == connection)) preeditEnd()
+        val lost = pointers.filterValues { connection == null || it == connection }.keys.toList()
+        lost.forEach { id ->
+            pointers.remove(id)
+            guarded("source loss", Unit) { WebBackend.root.dispatchPointer(PointerEvent.Cancel(id)) }
         }
-
-    private const val MAX_CODE_POINT = 0x10FFFF
+    }
+    private inline fun <T> guarded(what: String, fallback: T, block: () -> T): T = try { block() }
+    catch (failure: Throwable) { dslLogger.error("web input: $what failed", failure); fallback }
 }

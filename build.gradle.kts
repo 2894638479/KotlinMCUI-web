@@ -81,6 +81,13 @@ val coreLibrary: Any = coreArtifacts.first
 /** The navigation half: compile classpath only. */
 val coreSources: Any? = coreArtifacts.second
 
+/** Example pages are a separate core artifact. */
+val coreDemoLibrary: Any = rootProject.file("../kotlinmcui").let { sibling ->
+    if (sibling.isDirectory) files(sibling.resolve("build/libs/kotlinmcui-$kotlinmcui_version-demo.jar").also {
+        check(it.exists()) { "the local core demo jar is missing: run ./gradlew assemble in ../kotlinmcui" }
+    }) else "com.github.2894638479:KotlinMCUI:v$kotlinmcui_version:demo"
+}
+
 /** What `main()` needs at runtime. Kept out of `runtimeClasspath` so the built jar stays a library. */
 val standalone = configurations.create("standalone") {
     isCanBeConsumed = false
@@ -89,6 +96,7 @@ val standalone = configurations.create("standalone") {
 
 dependencies {
     compileOnly(coreLibrary)
+    compileOnly(coreDemoLibrary)
     coreSources?.let { compileOnly(it) }
     compileOnly(slf4j)
     compileOnly(fastutil)
@@ -100,6 +108,7 @@ dependencies {
     compileOnly(kotlin("reflect"))
 
     standalone(coreLibrary)
+    standalone(coreDemoLibrary)
     standalone(slf4j)
     // A logging backend, so a standalone run says what it is doing.
     standalone(slf4jSimple)
@@ -113,6 +122,7 @@ dependencies {
     // dependency it names at runtime - a jar dependency brings no transitive dependency with it.
     testImplementation(kotlin("test"))
     testImplementation(coreLibrary)
+    testImplementation(coreDemoLibrary)
     testImplementation(slf4j)
     testImplementation(fastutil)
     testImplementation(coroutines)

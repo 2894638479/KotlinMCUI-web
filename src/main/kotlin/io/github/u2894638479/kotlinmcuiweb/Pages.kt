@@ -5,6 +5,7 @@ import io.github.u2894638479.kotlinmcui.entry.DslEntryPage
 import io.github.u2894638479.kotlinmcui.test.TestAnimationPage
 import io.github.u2894638479.kotlinmcui.test.TestBackendRenderPage
 import io.github.u2894638479.kotlinmcui.test.TestColorPage
+import io.github.u2894638479.kotlinmcui.test.TestMultiPointerPage
 import io.github.u2894638479.kotlinmcui.test.TestImagePage
 import io.github.u2894638479.kotlinmcui.test.TestLayoutPage
 import io.github.u2894638479.kotlinmcui.test.TestScrollPage
@@ -13,7 +14,7 @@ import io.github.u2894638479.kotlinmcui.test.TestTransformPage
 
 /** The names a command line can ask for, in the order the help text lists them. */
 internal val PAGE_NAMES = listOf(
-    "entry", "color", "render", "transform", "text", "scroll", "animation", "layout", "image",
+    "entry", "color", "render", "transform", "text", "scroll", "animation", "layout", "image", "multitouch",
 )
 
 /**
@@ -36,6 +37,7 @@ internal fun pageNamed(name: String) {
         "animation" -> TestAnimationPage()
         "layout" -> TestLayoutPage()
         "image" -> TestImagePage()
+        "multitouch" -> TestMultiPointerPage()
         else -> error("unknown page '$name'; try ${PAGE_NAMES.joinToString(", ")}")
     }
 }

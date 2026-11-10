@@ -51,3 +51,5 @@ Test-Path ..\kotlinmcui\build\libs\kotlinmcui-1.0.0-alpha.32.jar
 - **输入没有归属**，两个鼠标都能操作同一个页面栈。
 
 宿主若要服务多个客户端，需要自己做尺寸、语言与输入的仲裁。
+
+输入适配与实际设备能力见 [指针输入开发说明](docs/dev/pointer-input.md)。

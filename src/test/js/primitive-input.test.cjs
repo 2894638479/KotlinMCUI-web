@@ -960,72 +960,103 @@ test('a zero or unusable displayed rectangle drops the event instead of sending 
   assert.deepEqual(api.socket().sent, [], 'an undisplayable canvas still produced input events');
 });
 
-test('a valid press is released after the canvas becomes unmappable', () => {
+function pointerEvent(overrides = {}) {
+  return { pointerId: 7, pointerType: 'mouse', buttons: 0, button: -1,
+    clientX: 10.5, clientY: 20.25, preventDefault() {}, ...overrides };
+}
+
+test('an unmappable captured surface cancels without inventing a release position', () => {
   const { api, screen } = createClient();
-  const invalid = [
-    { left: 0, top: 0, width: 0, height: 480 },
-    { left: 0, top: 0, width: 640, height: 0 },
-    { left: 0, top: 0, width: Number.NaN, height: 480 },
-    { left: 0, top: 0, width: 640, height: Number.POSITIVE_INFINITY },
-  ];
-  for (const bounds of invalid) {
-    screen.width = 640;
-    screen.height = 480;
-    screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
-    api.socket().sent.length = 0;
-
-    screen.listeners.pointerdown[0]({
-      clientX: 10.5, clientY: 20.25, button: 0, pointerId: 7, preventDefault() {},
-    });
-    assert.deepEqual(api.socket().sent, ['move 21 40.5', 'button 0 down 0']);
-    assert.ok(screen.hasPointerCapture(7), 'a valid press did not capture the pointer');
-
-    // The canvas can resize to zero or lose its display between press and release. Moving there has
-    // no defined mapping, so no move may be invented; the release still has to arrive.
-    screen.bounds = bounds;
-    api.socket().sent.length = 0;
-    screen.listeners.pointermove[0]({ clientX: 50, clientY: 50 });
-    assert.deepEqual(api.socket().sent, [], `an invalid move escaped for bounds ${JSON.stringify(bounds)}`);
-
-    screen.listeners.pointerup[0]({
-      clientX: 50, clientY: 50, button: 0, pointerId: 7, preventDefault() {},
-    });
-    assert.deepEqual(api.socket().sent, ['button 0 up 0'],
-      `the held button was not released for bounds ${JSON.stringify(bounds)}`);
-    assert.equal(screen.hasPointerCapture(7), false, 'pointer capture survived the release');
-  }
+  screen.width = 640; screen.height = 480;
+  screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+  screen.listeners.pointerdown[0](pointerEvent({ buttons: 1, button: 0 }));
+  assert.deepEqual(api.socket().sent, ['pointer down 7 mouse 21 40.5 0 1 1 0.5 0']);
+  assert.ok(screen.hasPointerCapture(7));
+  screen.bounds.width = 0;
+  api.socket().sent.length = 0;
+  screen.listeners.pointerup[0](pointerEvent({ button: 0 }));
+  assert.deepEqual(api.socket().sent, ['pointer cancel 7']);
+  assert.equal(screen.hasPointerCapture(7), false);
 });
 
-test('pointercancel releases a held button and its capture without a coordinate', () => {
+test('pointercancel clears exactly one contact and ignores the following capture loss', () => {
   const { api, screen } = createClient();
-  screen.width = 640;
-  screen.height = 480;
-  screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
+  screen.listeners.pointerdown[0](pointerEvent({ buttons: 1, button: 0, pointerType: 'touch' }));
+  screen.listeners.pointerdown[0](pointerEvent({ pointerId: 8, buttons: 1, button: 0, pointerType: 'touch' }));
   api.socket().sent.length = 0;
-
-  screen.listeners.pointerdown[0]({
-    clientX: 10.5, clientY: 20.25, button: 0, pointerId: 7, preventDefault() {},
-  });
-  assert.deepEqual(api.socket().sent, ['move 21 40.5', 'button 0 down 0']);
-  api.socket().sent.length = 0;
-
-  screen.listeners.pointercancel[0]({ pointerId: 7, button: -1, preventDefault() {} });
-  assert.deepEqual(api.socket().sent, ['button 0 up 0']);
-  assert.equal(screen.hasPointerCapture(7), false, 'a cancelled pointer kept its capture');
-  // The browser also reports the capture loss after cancellation; that must not release twice.
-  screen.listeners.lostpointercapture[0]({ pointerId: 7, button: -1, preventDefault() {} });
-  assert.deepEqual(api.socket().sent, ['button 0 up 0']);
+  screen.listeners.pointercancel[0]({ pointerId: 7 });
+  screen.listeners.lostpointercapture[0]({ pointerId: 7 });
+  assert.deepEqual(api.socket().sent, ['pointer cancel 7']);
+  assert.equal(screen.hasPointerCapture(7), false);
+  assert.equal(screen.hasPointerCapture(8), true);
 });
 
-test('the normal pointer path sends the mapped position unchanged', () => {
+test('the normal hover path sends fractional output pixels unchanged', () => {
   const { api, screen } = createClient();
-  screen.width = 640;
-  screen.height = 480;
+  screen.width = 640; screen.height = 480;
   screen.bounds = { left: 0, top: 0, width: 320, height: 240 };
-  api.socket().sent.length = 0;
+  screen.listeners.pointermove[0](pointerEvent());
+  assert.deepEqual(api.socket().sent, ['pointer move 7 mouse 21 40.5 -1 0 1 0 0']);
+});
 
-  screen.listeners.pointermove[0]({ clientX: 10.5, clientY: 20.25 });
-  assert.deepEqual(api.socket().sent, ['move 21 40.5']);
+test('DOM multi-button moves normalize into one identity with complete snapshots', () => {
+  const { api, screen } = createClient();
+  screen.listeners.pointerdown[0](pointerEvent({ buttons: 1, button: 0 }));
+  screen.listeners.pointermove[0](pointerEvent({ buttons: 3, button: 2 }));
+  screen.listeners.pointermove[0](pointerEvent({ buttons: 2, button: 0 }));
+  screen.listeners.pointerup[0](pointerEvent({ buttons: 0, button: 2 }));
+  assert.deepEqual(api.socket().sent.map((text) => text.split(' ').slice(0, 4).join(' ')),
+    ['pointer down 7 mouse', 'pointer down 7 mouse', 'pointer up 7 mouse', 'pointer up 7 mouse']);
+  assert.deepEqual(api.socket().sent.map((text) => Number(text.split(' ')[7])), [1, 3, 2, 0]);
+});
+
+test('stationary pen pressure moves and non-final side button Up retain pressure', () => {
+  const { api, screen } = createClient();
+  screen.listeners.pointermove[0](pointerEvent({ pointerType: 'pen' }));
+  screen.listeners.pointerdown[0](pointerEvent({ pointerType: 'pen', buttons: 1, pressure: 0.1 }));
+  screen.listeners.pointermove[0](pointerEvent({ pointerType: 'pen', buttons: 1, pressure: 0.9 }));
+  screen.listeners.pointermove[0](pointerEvent({ pointerType: 'pen', buttons: 3, pressure: 0.8 }));
+  screen.listeners.pointermove[0](pointerEvent({ pointerType: 'pen', buttons: 1, pressure: 0.7 }));
+  const samples = api.socket().sent.map((text) => text.split(' '));
+  assert.equal(samples[2][1], 'move');
+  assert.equal(samples[2][9], '0.9');
+  assert.equal(samples[4][1], 'up');
+  assert.equal(samples[4][9], '0.7');
+});
+
+test('Leave retains native capture and blur cancels every identity', () => {
+  const { api, screen } = createClient();
+  screen.listeners.pointerdown[0](pointerEvent({ buttons: 1 }));
+  screen.listeners.pointerdown[0](pointerEvent({ pointerId: 8, pointerType: 'touch', buttons: 1 }));
+  api.socket().sent.length = 0;
+  screen.listeners.pointerleave[0]({ pointerId: 7 });
+  assert.equal(screen.hasPointerCapture(7), true);
+  api.window.listeners.blur[0]();
+  assert.deepEqual(api.socket().sent, ['pointer leave 7', 'pointer cancel 7', 'pointer cancel 8', 'blur']);
+  assert.equal(screen.hasPointerCapture(7), false);
+  assert.equal(screen.hasPointerCapture(8), false);
+});
+
+test('composition commits once and a late compositionend after blur is discarded', () => {
+  const { api } = createClient();
+  api.window.listeners.compositionstart[0]();
+  api.window.listeners.compositionupdate[0]({ data: '你' });
+  api.window.listeners.compositionend[0]({ data: '你' });
+  assert.deepEqual(api.socket().sent, ['compositionstart', 'preedit %E4%BD%A0', 'compositionend %E4%BD%A0']);
+  api.socket().sent.length = 0;
+  api.window.listeners.compositionstart[0]();
+  api.window.listeners.blur[0]();
+  api.window.listeners.compositionend[0]({ data: 'old' });
+  assert.deepEqual(api.socket().sent, ['compositionstart', 'blur']);
+});
+
+test('native identity reuse for another device first cancels the previous source', () => {
+  const { api, screen } = createClient();
+  screen.listeners.pointermove[0](pointerEvent({ pointerId: -5 }));
+  screen.listeners.pointerdown[0](pointerEvent({ pointerId: -5, pointerType: 'pen', buttons: 1 }));
+  assert.match(api.socket().sent[0], /^pointer move 4294967291 mouse /);
+  assert.equal(api.socket().sent[1], 'pointer cancel 4294967291');
+  assert.match(api.socket().sent[2], /^pointer down 4294967291 pen /);
 });
 
 test('a mapped input position addresses the same output pixel in drawing and clipping', () => {
